@@ -1,0 +1,69 @@
+# Node modules
+node_modules/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Runtime files
+pids/
+*.pid
+*.seed
+
+# Build / output
+dist/
+build/
+coverage/
+.nyc_output/
+coverage/*.json
+
+# Environment / secrets
+.env
+.env.*.local
+.env.local
+.env.test
+.env.production
+
+# Database files (local dev)
+*.sqlite
+*.sqlite3
+*.db
+
+# Package manager cache/artifacts
+*.tgz
+
+# IDE / editor
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+ehthumbs.db
+
+# Temp / cache
+tmp/
+temp/
+.cache/
+.parcel-cache/
+
+# Misc
+reports/
+
+# Ignore local credential files commonly used by tools
+credentials.json
+*.pem
+*.key
+
+# Keep migration and seed files (do NOT ignore db/migrations or db/seeds)
+!db/migrations/
+!db/seeds/
