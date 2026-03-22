@@ -13,10 +13,27 @@ export async function createOrganization({userId, name}) {
         id: generateUUID(),
         organization_id: organizationId,
         user_id: userId,
-        role: 'admin'
+        role: 'owner'
     });
 
-    return { id: organizationId, name };
+    // create a default library for the organization
+    const libraryId = generateUUID();
+    const defaultLibraryName = 'Default Library';
+    await db('libraries').insert({
+        id: libraryId,
+        organization_id: organizationId,
+        name: defaultLibraryName
+    });
+
+    // create a library membership for the creator (owner)
+    await db('library_memberships').insert({
+        id: generateUUID(),
+        library_id: libraryId,
+        user_id: userId,
+        role: 'owner'
+    });
+
+    return { id: organizationId, name, defaultLibrary: { id: libraryId, name: defaultLibraryName } };
 }
 
 export async function getOrganizationById(organizationId) {
@@ -41,8 +58,17 @@ export async function getOrganizationMembers(organizationId) {
     const members = await db('organization_memberships')
         .join('users', 'organization_memberships.user_id', 'users.id')
         .where('organization_memberships.organization_id', organizationId)
-        .select('users.id', 'users.name', 'users.email', 'organization_memberships.role');
+        .select('users.id', 'users.name', 'users.email', 'organization_memberships.role as membership_role');
     return members;
+}
+
+// helper: get a single membership for a given user in an organization
+export async function getMembershipForUser(organizationId, userId) {
+    const row = await db('organization_memberships')
+        .where({ organization_id: organizationId, user_id: userId })
+        .first();
+    if (!row) return null;
+    return { id: row.id, organization_id: row.organization_id, user_id: row.user_id, role: row.role };
 }
 
 export async function removeMemberFromOrganization({ organizationId, userId }) {

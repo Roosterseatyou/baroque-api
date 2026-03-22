@@ -4,22 +4,136 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
-const PORT = process.env.PORT;
+const PORT = process.env.PORT || 3000;
+const LISTEN_HOST = process.env.LISTEN_HOST || '0.0.0.0';
+// If true, skip running migrations at startup
+const SKIP_MIGRATIONS = String(process.env.SKIP_MIGRATIONS || '').toLowerCase() === 'true';
+// If true, start the server even when DB/migrations fail (useful for environments without DB)
+const START_WITHOUT_DB = String(process.env.START_WITHOUT_DB || '').toLowerCase() === 'true';
+
+
+function getPathFromRegexp(re) {
+    if (!re || !re.source) return '';
+    return re.source
+        .replace('\\/?', '/')
+        .replace('(?=\\/|$)', '')
+        .replace('^', '')
+        .replace('$', '')
+        .replace(/\\\//g, '/');
+}
+
+function resolveRouterStack(appOrRouter) {
+    if (!appOrRouter) return null;
+    // Common Express app shape
+    if (appOrRouter._router && Array.isArray(appOrRouter._router.stack)) return appOrRouter._router.stack;
+    // Router exported directly (some code exports Router instance)
+    if (Array.isArray(appOrRouter.stack)) return appOrRouter.stack;
+    // Some wrapped router shapes (e.g., mounted middleware)
+    if (appOrRouter.handle && appOrRouter.handle.stack && Array.isArray(appOrRouter.handle.stack)) return appOrRouter.handle.stack;
+    if (appOrRouter.router && Array.isArray(appOrRouter.router.stack)) return appOrRouter.router.stack;
+    return null;
+}
+
+function printRoutes(appOrRouter) {
+    const routerStack = resolveRouterStack(appOrRouter);
+    if (!routerStack) {
+        console.log('No router stack found (app may not be an Express app/router). Attempting to show available keys for debugging:');
+        try {
+            const keys = Object.keys(appOrRouter || {}).slice(0, 50);
+            console.log(keys.join(', '));
+        } catch (err) {
+            // ignore
+        }
+        return;
+    }
+
+    const results = [];
+
+    function traverse(stack, prefix = '') {
+        stack.forEach((layer) => {
+            // route registered directly
+            if (layer.route && layer.route.path) {
+                const methods = Object.keys(layer.route.methods || {}).map(m => m.toUpperCase()).join(', ');
+                const raw = `${prefix}${layer.route.path}`;
+                const clean = raw.replace(/\/+/g, '/'); // collapse duplicate slashes
+                results.push(`${methods} ${clean}`);
+            } else if (layer.name === 'router' && layer.handle && layer.handle.stack) {
+                // mounted router — extract mount path from layer.regexp or layer.path
+                const mountPath = getPathFromRegexp(layer.regexp) || (layer.path || '');
+                const newPrefix = (prefix + mountPath).replace(/\/+/g, '/');
+                traverse(layer.handle.stack, newPrefix);
+            } else if (layer.path && layer.path !== '/') {
+                // fallback for some router implementations
+                const raw = `${prefix}${layer.path}`;
+                results.push(raw.replace(/\/+/g, '/'));
+            } else if (layer.handle && layer.handle.stack) {
+                // nested router under `handle`
+                traverse(layer.handle.stack, prefix);
+            }
+        });
+    }
+
+    traverse(routerStack, '');
+
+    if (results.length === 0) {
+        console.log('No routes found. Dumping router stack for debugging:');
+        console.dir(routerStack, { depth: 4 });
+    } else {
+        results.sort().forEach(r => console.log(r));
+    }
+}
+
+async function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+async function migrateWithRetry({ maxAttempts = 30, initialDelayMs = 2000 } = {}) {
+    let attempt = 0;
+    let delay = initialDelayMs;
+    while (attempt < maxAttempts) {
+        attempt++;
+        try {
+            console.log(`Running Migrations... (attempt ${attempt}/${maxAttempts})`);
+            await knex.migrate.latest();
+            console.log("Migrations completed.");
+            return;
+        } catch (err) {
+            console.warn(`Migration attempt ${attempt} failed: ${err && err.message ? err.message : err}`);
+            if (attempt >= maxAttempts) {
+                throw err;
+            }
+            console.log(`Waiting ${delay}ms before retrying migrations...`);
+            await sleep(delay);
+            // exponential backoff with a cap
+            delay = Math.min(delay * 2, 30000);
+        }
+    }
+}
 
 async function init() {
   try {
-    console.log("Running Migrations...");
-    await knex.migrate.latest();
-    console.log("Migrations completed.");
+    if (SKIP_MIGRATIONS) {
+        console.log('SKIP_MIGRATIONS=true — skipping database migrations at startup');
+    } else {
+        try {
+            await migrateWithRetry();
+        } catch (mErr) {
+            console.error('Migrations failed after retries:', mErr && mErr.message ? mErr.message : mErr);
+            if (!START_WITHOUT_DB) {
+                // If we require DB, exit with failure
+                throw new Error(mErr && mErr.message ? mErr.message : String(mErr));
+            }
+            console.warn('START_WITHOUT_DB=true — continuing startup despite failed migrations');
+        }
+    }
 
-    const server = app.listen(PORT, () => {
-      console.log(`Server is running on port ${PORT}`);
+    const server = app.listen(PORT, LISTEN_HOST, () => {
+      console.log(`Server is running on ${LISTEN_HOST}:${PORT}`);
+      printRoutes(app);
     });
 
     const shutdown = async () => {
         console.log("Shutting down server...");
         server.close(async () => {});
-        await knex.destroy();
+        try { await knex.destroy(); } catch (e) { /* ignore */ }
         console.log("Server shut down complete.");
         process.exit(0);
     }

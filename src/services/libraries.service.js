@@ -30,3 +30,12 @@ export async function getLibraries(organizationId) {
         .where({ organization_id: organizationId });
     return libraries;
 }
+
+// helper: get a single library membership for a user
+export async function getMembershipForUser(libraryId, userId) {
+    const row = await db('library_memberships')
+        .where({ library_id: libraryId, user_id: userId })
+        .first();
+    if (!row) return null;
+    return { id: row.id, library_id: row.library_id, user_id: row.user_id, role: row.role };
+}

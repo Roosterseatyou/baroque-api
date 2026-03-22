@@ -38,3 +38,10 @@ export async function getUserLibraries(userId) {
         .select('libraries.*', 'library_memberships.role as membership_role');
     return libraries;
 }
+
+// find a user by email (used by invitation flow)
+export async function getUserByEmail(email) {
+    if (!email) return null;
+    const user = await db('users').where({ email }).first();
+    return user || null;
+}

@@ -8,14 +8,15 @@ const GOOGLE_OAUTH2_AUTH_BASE_URL = 'https://accounts.google.com/o/oauth2/v2/aut
 const GOOGLE_OAUTH2_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const GOOGLE_OAUTH2_USERINFO_URL = 'https://www.googleapis.com/oauth2/v3/userinfo';
 
-export function getGoogleAuth() {
+export function getGoogleAuth(state) {
     const params = new URLSearchParams({
         client_id: GOOGLE_CLIENT_ID,
         redirect_uri: GOOGLE_REDIRECT_URI,
         response_type: 'code',
         scope: 'openid email profile',
         access_type: 'offline',
-        prompt: 'consent'
+        prompt: 'consent',
+        state: state
     });
 
     return `${GOOGLE_OAUTH2_AUTH_BASE_URL}?${params.toString()}`;

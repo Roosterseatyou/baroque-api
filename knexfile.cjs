@@ -17,14 +17,14 @@ const testConnection = {
 
 module.exports =  {
   development: {
-    client: 'mysql',
+    client: 'mysql2',
     connection: defaultConnection,
     migrations: {
       directory: './src/db/migrations'
     }
   },
   test: {
-    client: 'mysql',
+    client: 'mysql2',
     connection: testConnection,
     migrations: {
       directory: './src/db/migrations'

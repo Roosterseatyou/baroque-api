@@ -9,8 +9,8 @@ router.post('/', authenticate, orgsController.createOrganization);
 router.get('/:organizationId', authenticate, orgsController.getOrganization);
 router.put('/:organizationId', authenticate, requireOrgRole(), orgsController.updateOrganization);
 router.delete('/:organizationId', authenticate, requireOrgRole(), orgsController.deleteOrganization);
-router.post('/:organizationId/invite', authenticate, requireOrgRole('admin'), orgsController.addMember);
-router.post('/:organizationId/remove', authenticate, requireOrgRole('admin'), orgsController.removeMember);
+router.post('/:organizationId/invite', authenticate, requireOrgRole(), orgsController.addMember);
+router.post('/:organizationId/remove', authenticate, requireOrgRole(), orgsController.removeMember);
 router.get('/:organizationId/members', authenticate, requireOrgRole(), orgsController.getMembers);
 
 export default router;
