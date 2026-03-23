@@ -102,6 +102,11 @@ export async function googleAuth(req, res) {
 
 export async function googleCallback(req, res) {
     try {
+        if (process.env.NODE_ENV !== 'production') {
+            try {
+                console.log('auth.googleCallback invoked:', { url: req.originalUrl, path: req.path, cookiesHeader: req.headers && req.headers.cookie ? req.headers.cookie : null });
+            } catch (e) {}
+        }
         const { code, state } = req.query;
         if (!code) return res.status(400).json({ error: 'code not found' });
         // validate state from cookie (strict)

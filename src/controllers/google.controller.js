@@ -47,6 +47,11 @@ export async function authorize(req, res) {
 
 export async function callback(req, res) {
   try {
+    if (process.env.NODE_ENV !== 'production') {
+      try {
+        console.log('google.callback invoked:', { url: req.originalUrl, path: req.path, cookiesHeader: req.headers && req.headers.cookie ? req.headers.cookie : null });
+      } catch (e) {}
+    }
     const { code, state } = req.query
     if (!code) return res.status(400).json({ error: 'code missing' })
 
@@ -68,24 +73,53 @@ export async function callback(req, res) {
 
     // upsert into oauth_info table for the userId
     let userId = record ? record.user_id : null
-    if (!userId) {
-      // best-effort: try to map by email from token
+    // fetch userinfo to allow mapping or creation
+    let ui = null
+    try {
+      oAuth2Client.setCredentials(tokens)
+      const oauth2 = google.oauth2({ auth: oAuth2Client, version: 'v2' })
+      const uiResp = await oauth2.userinfo.get()
+      ui = uiResp && uiResp.data ? uiResp.data : null
+    } catch (e) {
+      console.warn('google.callback: failed to fetch userinfo', e && e.message)
+    }
+
+    const email = ui && ui.email
+    const providerUserId = ui && (ui.sub || ui.id)
+    const name = ui && ui.name
+    const avatarUrl = ui && ui.picture
+
+    if (!userId && email) {
       try {
-        oAuth2Client.setCredentials(tokens)
-        const oauth2 = google.oauth2({ auth: oAuth2Client, version: 'v2' })
-        const ui = await oauth2.userinfo.get()
-        const email = ui && ui.data && ui.data.email
-        if (email) {
-          const userRow = await knex('users').where({ email }).first()
-          if (userRow) {
-            userId = userRow.id
-            console.log('google.callback: mapped to user by email', email, userId)
-          } else {
-            console.warn('google.callback: no local user for google email', email)
-          }
+        const userRow = await knex('users').where({ email }).first()
+        if (userRow) {
+          userId = userRow.id
+          console.log('google.callback: mapped to user by email', email, userId)
+        } else {
+          console.warn('google.callback: no local user for google email', email)
         }
       } catch (e) {
-        console.warn('google.callback: failed to fetch userinfo to map email', e && e.message)
+        console.warn('google.callback: failed to lookup user by email', e && e.message)
+      }
+    }
+
+    // Optionally allow creating a new local user on OAuth sign-up (opt-in via env)
+    if (!userId && process.env.ALLOW_GOOGLE_SIGNUP === 'true') {
+      try {
+        const created = await authService.createOrFindUserByGoogle({
+          googleId: providerUserId,
+          email,
+          name,
+          avatarUrl,
+          accessToken: tokens.access_token,
+          refreshToken: tokens.refresh_token
+        })
+        if (created && created.id) {
+          userId = created.id
+          console.log('google.callback: created local user for google sign-up', userId)
+        }
+      } catch (e) {
+        console.warn('google.callback: failed to create local user from google profile', e && e.message)
       }
     }
 
@@ -94,7 +128,7 @@ export async function callback(req, res) {
       if (existing) {
         await knex('oauth_info').where({ id: existing.id }).update({ access_token: tokens.access_token || null, refresh_token: tokens.refresh_token || existing.refresh_token || null, token_expires_at: tokens.expiry_date ? new Date(tokens.expiry_date) : null, updated_at: knex.fn.now() })
       } else {
-        await knex('oauth_info').insert({ id: (await import('../utils/uuid.js')).generateUUID(), user_id: userId, email: null, provider: 'google', provider_user_id: null, avatar_url: null, access_token: tokens.access_token || null, refresh_token: tokens.refresh_token || null, token_expires_at: tokens.expiry_date ? new Date(tokens.expiry_date) : null, created_at: knex.fn.now(), updated_at: knex.fn.now() })
+        await knex('oauth_info').insert({ id: (await import('../utils/uuid.js')).generateUUID(), user_id: userId, email: email || null, provider: 'google', provider_user_id: providerUserId || null, avatar_url: avatarUrl || null, access_token: tokens.access_token || null, refresh_token: tokens.refresh_token || null, token_expires_at: tokens.expiry_date ? new Date(tokens.expiry_date) : null, created_at: knex.fn.now(), updated_at: knex.fn.now() })
       }
       // create a server-side refresh token and set HttpOnly cookie so SPA can call /auth/refresh
       try {
