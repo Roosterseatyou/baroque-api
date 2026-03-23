@@ -95,8 +95,18 @@ export async function googleAuth(req, res) {
     }
 
     res.cookie(OAUTH_STATE_COOKIE, payload, cookieOptions);
-
-    const url = googleAuthService.getGoogleAuth(state);
+    // Allow configuring required OAuth scopes via env (comma- or space-separated). If not set,
+    // include the basic openid/email/profile plus Drive/Sheets readonly used by integrations.
+    const DEFAULT_SCOPES = [
+        'openid',
+        'email',
+        'profile',
+        'https://www.googleapis.com/auth/drive.readonly',
+        'https://www.googleapis.com/auth/spreadsheets.readonly'
+    ];
+    const raw = process.env.GOOGLE_OAUTH_SCOPES || DEFAULT_SCOPES.join(' ');
+    // pass includeGrantedScopes=false to force consent for requested scopes on first-login
+    const url = googleAuthService.getGoogleAuth(state, raw, false);
     return res.redirect(url);
 }
 

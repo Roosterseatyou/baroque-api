@@ -8,16 +8,26 @@ const GOOGLE_OAUTH2_AUTH_BASE_URL = 'https://accounts.google.com/o/oauth2/v2/aut
 const GOOGLE_OAUTH2_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const GOOGLE_OAUTH2_USERINFO_URL = 'https://www.googleapis.com/oauth2/v3/userinfo';
 
-export function getGoogleAuth(state) {
+// Build the Google OAuth2 authorization URL. Accepts either an array of scopes or a space/comma-separated string.
+export function getGoogleAuth(state, scopes = 'openid email profile', includeGrantedScopes = false) {
+    let scopeString = '';
+    if (Array.isArray(scopes)) scopeString = scopes.join(' ');
+    else scopeString = String(scopes).replace(/,/g, ' ').trim();
+
     const params = new URLSearchParams({
         client_id: GOOGLE_CLIENT_ID,
         redirect_uri: GOOGLE_REDIRECT_URI,
         response_type: 'code',
-        scope: 'openid email profile',
+        scope: scopeString || 'openid email profile',
         access_type: 'offline',
         prompt: 'consent',
         state: state
     });
+
+    // When include_granted_scopes is true, Google will include previously granted scopes rather than prompting
+    // to re-consent; we default to false so we can force full consent on first-login if desired.
+    if (includeGrantedScopes) params.set('include_granted_scopes', 'true');
+    else params.set('include_granted_scopes', 'false');
 
     return `${GOOGLE_OAUTH2_AUTH_BASE_URL}?${params.toString()}`;
 }
