@@ -104,7 +104,8 @@ export async function callback(req, res) {
         const REFRESH_COOKIE_OPTIONS = {
           httpOnly: true,
           secure: process.env.NODE_ENV === 'production',
-          sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax',
+          // Allow cross-site set-cookie on OAuth redirect in production
+          sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
           // Use '/' so SPA can POST /auth/refresh and browser will include the cookie reliably
           path: '/'
         }

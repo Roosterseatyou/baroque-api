@@ -4,21 +4,23 @@ import crypto from 'crypto';
 
 const REFRESH_COOKIE_NAME = 'refresh_token';
 const IS_PROD = process.env.NODE_ENV === 'production'
+// Use SameSite='none' in production so the refresh cookie can be set/seen during the
+// cross-site OAuth redirect from Google. Browsers require Secure when SameSite=None.
 const REFRESH_COOKIE_OPTIONS = {
     httpOnly: true,
-    // In production require secure. In development use secure=false and SameSite='lax' so browsers accept Set-Cookie on top-level redirect.
     secure: IS_PROD,
-    sameSite: IS_PROD ? 'strict' : 'lax',
+    sameSite: IS_PROD ? 'none' : 'lax',
     // use root path so the browser includes the cookie for /auth/refresh
     path: '/',
     // maxAge not set here; the token has its own expiry in DB
 };
 
 const OAUTH_STATE_COOKIE = 'oauth_state';
+// OAuth state cookie must also be settable/readable across the Google redirect.
 const OAUTH_STATE_OPTIONS = {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
-    sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax',
+    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
     path: '/auth',
     maxAge: 10 * 60 * 1000 // 10 minutes
 };
@@ -68,7 +70,8 @@ export async function logout(req, res) {
         if (refreshToken) {
             await authService.revokeRefreshToken(refreshToken);
         }
-        res.clearCookie(REFRESH_COOKIE_NAME, { path: '/auth' });
+        // cookie is set at path '/'
+        res.clearCookie(REFRESH_COOKIE_NAME, { path: '/' });
         res.status(204).send();
     } catch (error) {
         res.status(500).json({ error: error.message });
