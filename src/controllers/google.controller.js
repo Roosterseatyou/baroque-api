@@ -1,7 +1,9 @@
 import * as googleService from '../services/google.service.js'
 import * as authService from '../services/auth.service.js'
+import * as googleAuthService from '../services/googleAuth.service.js'
 import knex from '../config/knex.js'
 import { google } from 'googleapis'
+import debug from '../utils/debug.js'
 
 const { GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI, FRONTEND_ORIGIN } = process.env
 
@@ -19,20 +21,17 @@ export async function authorize(req, res) {
     // persist server-side
     await knex('oauth_states').insert({ state, user_id: user.id, redirect_to: redirectTo })
 
-    const oAuth2Client = makeOAuth2Client()
-    const url = oAuth2Client.generateAuthUrl({
-      access_type: 'offline',
-      prompt: 'consent',
-      include_granted_scopes: false,
-      scope: [
-        'openid',
-        'email',
-        'profile',
-        'https://www.googleapis.com/auth/drive.readonly',
-        'https://www.googleapis.com/auth/spreadsheets.readonly'
-      ],
-      state
-    })
+    // Use the same ENV-configurable scopes as the SPA sign-in flow.
+    const DEFAULT_SCOPES = [
+      'openid',
+      'email',
+      'profile',
+      'https://www.googleapis.com/auth/drive.readonly',
+      'https://www.googleapis.com/auth/spreadsheets.readonly'
+    ]
+    const raw = process.env.GOOGLE_OAUTH_SCOPES || DEFAULT_SCOPES.join(' ')
+    // For integrations/linking flow, allow include_granted_scopes=true so existing grants are honored
+    const url = googleAuthService.getGoogleAuth(state, raw, true)
 
     const accept = (req.get('Accept') || '')
     if (accept.includes('application/json') || req.xhr) {
@@ -47,11 +46,7 @@ export async function authorize(req, res) {
 
 export async function callback(req, res) {
   try {
-    if (process.env.NODE_ENV !== 'production') {
-      try {
-        console.log('google.callback invoked:', { url: req.originalUrl, path: req.path, cookiesHeader: req.headers && req.headers.cookie ? req.headers.cookie : null });
-      } catch (e) {}
-    }
+    debug.debugLog('google.callback invoked:', { url: req.originalUrl, path: req.path, cookiesHeader: req.headers && req.headers.cookie ? req.headers.cookie : null });
     const { code, state } = req.query
     if (!code) return res.status(400).json({ error: 'code missing' })
 
@@ -62,14 +57,7 @@ export async function callback(req, res) {
     }
 
     const oAuth2Client = makeOAuth2Client()
-    const { tokens } = await oAuth2Client.getToken(code); // Debug: log granted scopes and whether a refresh token was returned (do not log full tokens)
-    try {
-      const grantedScopes = tokens.scope || tokens.scopes || null
-      const hasRefresh = !!tokens.refresh_token
-      console.log('google.callback: token exchange result - scopes=', grantedScopes, 'hasRefresh=', hasRefresh)
-    } catch (e) {
-      // ignore logging failures
-    }
+    const { tokens } = await oAuth2Client.getToken(code);
 
     // upsert into oauth_info table for the userId
     let userId = record ? record.user_id : null
@@ -94,7 +82,7 @@ export async function callback(req, res) {
         const userRow = await knex('users').where({ email }).first()
         if (userRow) {
           userId = userRow.id
-          console.log('google.callback: mapped to user by email', email, userId)
+          debug.debugLog('google.callback: mapped to user by email', email, userId)
         } else {
           console.warn('google.callback: no local user for google email', email)
         }
@@ -116,7 +104,7 @@ export async function callback(req, res) {
         })
         if (created && created.id) {
           userId = created.id
-          console.log('google.callback: created local user for google sign-up', userId)
+          debug.debugLog('google.callback: created local user for google sign-up', userId)
         }
       } catch (e) {
         console.warn('google.callback: failed to create local user from google profile', e && e.message)
@@ -144,7 +132,7 @@ export async function callback(req, res) {
           path: '/'
         }
         try { res.cookie(REFRESH_COOKIE_NAME, refresh.token, REFRESH_COOKIE_OPTIONS) } catch (e) { console.warn('Failed to set refresh cookie', e && e.message) }
-        console.log('google.callback: set refresh cookie for user', userId)
+        debug.debugLog('google.callback: set refresh cookie for user', userId)
       } catch (e) {
         console.warn('Failed to create server refresh token after google callback', e && e.message)
       }

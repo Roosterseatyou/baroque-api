@@ -3,6 +3,7 @@ import {generateUUID} from '../utils/uuid.js';
 import {comparePassword, hashPassword} from '../utils/hash.js';
 import {generateAccessToken} from '../utils/jwt.js';
 import crypto from 'crypto';
+import debug from '../utils/debug.js';
 
 export async function registerUser({ email, name, password }) {
     const existingUser = await db('users').where({ email }).first();
@@ -90,22 +91,22 @@ export async function loginUser({ email, password }, metadata = {}) {
 export async function exchangeRefreshToken(cookieValue, rotate = true, metadata = {}) {
     const parsed = splitSelectorVerifier(cookieValue);
     if (!parsed) {
-        if (process.env.NODE_ENV !== 'production') console.warn('exchangeRefreshToken: malformed refresh cookie');
+        debug.debugLog('exchangeRefreshToken: malformed refresh cookie');
         return null;
     }
     const row = await db('refresh_tokens').where({ selector: parsed.selector }).first();
     if (!row) {
-        if (process.env.NODE_ENV !== 'production') console.warn('exchangeRefreshToken: no db row for selector', parsed.selector);
+        debug.debugLog('exchangeRefreshToken: no db row for selector', parsed.selector);
         return null;
     }
     if (row.revoked) {
         // If token already revoked, this is reuse attempt — revoke all tokens for user
-        if (process.env.NODE_ENV !== 'production') console.warn('exchangeRefreshToken: token revoked for selector', parsed.selector);
+        debug.debugLog('exchangeRefreshToken: token revoked for selector', parsed.selector);
         await revokeAllRefreshTokensForUser(row.user_id, 'reuse_after_revocation');
         return null;
     }
     if (row.expires_at && new Date(row.expires_at) < new Date()) {
-        if (process.env.NODE_ENV !== 'production') console.warn('exchangeRefreshToken: token expired for selector', parsed.selector);
+        debug.debugLog('exchangeRefreshToken: token expired for selector', parsed.selector);
         await db('refresh_tokens').where({ selector: parsed.selector }).del();
         return null;
     }
@@ -113,7 +114,7 @@ export async function exchangeRefreshToken(cookieValue, rotate = true, metadata 
     const ok = await comparePassword(parsed.verifier, row.token);
     if (!ok) {
         // verifier mismatch but selector exists: possible theft — revoke all tokens for user
-        if (process.env.NODE_ENV !== 'production') console.warn('exchangeRefreshToken: verifier mismatch for selector', parsed.selector);
+        debug.debugLog('exchangeRefreshToken: verifier mismatch for selector', parsed.selector);
         await revokeAllRefreshTokensForUser(row.user_id, 'verifier_mismatch');
         await db('refresh_tokens').where({ selector: parsed.selector }).del();
         return null;

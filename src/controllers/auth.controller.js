@@ -1,6 +1,7 @@
 import * as authService from '../services/auth.service.js';
 import * as googleAuthService from '../services/googleAuth.service.js';
 import crypto from 'crypto';
+import debug from '../utils/debug.js'
 
 const REFRESH_COOKIE_NAME = 'refresh_token';
 const IS_PROD = process.env.NODE_ENV === 'production'
@@ -112,11 +113,7 @@ export async function googleAuth(req, res) {
 
 export async function googleCallback(req, res) {
     try {
-        if (process.env.NODE_ENV !== 'production') {
-            try {
-                console.log('auth.googleCallback invoked:', { url: req.originalUrl, path: req.path, cookiesHeader: req.headers && req.headers.cookie ? req.headers.cookie : null });
-            } catch (e) {}
-        }
+        debug.debugLog('auth.googleCallback invoked:', { url: req.originalUrl, path: req.path, cookiesHeader: req.headers && req.headers.cookie ? req.headers.cookie : null });
         const { code, state } = req.query;
         if (!code) return res.status(400).json({ error: 'code not found' });
         // validate state from cookie (strict)
