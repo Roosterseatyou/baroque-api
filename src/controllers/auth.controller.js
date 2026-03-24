@@ -101,9 +101,7 @@ export async function googleAuth(req, res) {
     const DEFAULT_SCOPES = [
         'openid',
         'email',
-        'profile',
-        'https://www.googleapis.com/auth/drive.readonly',
-        'https://www.googleapis.com/auth/spreadsheets.readonly'
+        'profile'
     ];
     const raw = process.env.GOOGLE_OAUTH_SCOPES || DEFAULT_SCOPES.join(' ');
     // pass includeGrantedScopes=false to force consent for requested scopes on first-login

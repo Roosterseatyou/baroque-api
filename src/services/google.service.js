@@ -46,38 +46,6 @@ export async function getOAuthClientForUser(userId) {
   return oAuth2Client
 }
 
-export async function listSpreadsheetsForUser(userId) {
-  const client = await getOAuthClientForUser(userId)
-  if (!client) throw new Error('Google not connected')
-  const drive = google.drive({ version: 'v3', auth: client })
-  try {
-    const res = await drive.files.list({
-      q: "mimeType='application/vnd.google-apps.spreadsheet' and trashed=false",
-      fields: 'files(id,name,modifiedTime,owners)',
-      pageSize: 200
-    })
-    return res.data.files || []
-  } catch (err) {
-    // Provide a clearer error for insufficient scopes
-    if (err && err.code === 403) {
-      throw new Error('Request had insufficient authentication scopes.')
-    }
-    throw err
-  }
-}
-
-export async function getSpreadsheetMetadata(userId, spreadsheetId) {
-  const client = await getOAuthClientForUser(userId)
-  if (!client) throw new Error('Google not connected')
-  const sheets = google.sheets({ version: 'v4', auth: client })
-  const res = await sheets.spreadsheets.get({ spreadsheetId, fields: 'sheets.properties(title,sheetId)' })
-  return res.data || { sheets: [] }
-}
-
-export async function getSpreadsheetValues(userId, spreadsheetId, range) {
-  const client = await getOAuthClientForUser(userId)
-  if (!client) throw new Error('Google not connected')
-  const sheets = google.sheets({ version: 'v4', auth: client })
-  const res = await sheets.spreadsheets.values.get({ spreadsheetId, range })
-  return res.data || { values: [] }
-}
+// NOTE: Sheets-specific helpers were removed to comply with reduced Google OAuth scopes.
+// The file retains OAuth client creation and token persistence helpers which are used
+// by the rest of the application for Google sign-in/token management.
