@@ -13,9 +13,12 @@ import db from './config/knex.js';
 
 const app = express();
 
-// Allow frontend origin (use FRONTEND_ORIGIN env var in dev if needed)
-const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || 'http://localhost:5173';
-app.use(cors({ origin: FRONTEND_ORIGIN, credentials: true }));
+// Allow frontend origin and api origin
+const allowedOrigins = [process.env.FRONTEND_ORIGIN, process.env.API_ORIGIN].filter(Boolean);
+app.use(cors({
+    origin: allowedOrigins,
+    credentials: true
+}));
 
 app.use(cookieParser());
 app.use(express.json());
