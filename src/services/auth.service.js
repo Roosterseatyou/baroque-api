@@ -1,4 +1,5 @@
 import db from '../config/knex.js';
+import * as usersService from './users.service.js';
 import {generateUUID} from '../utils/uuid.js';
 import {comparePassword, hashPassword} from '../utils/hash.js';
 import {generateAccessToken} from '../utils/jwt.js';
@@ -78,14 +79,30 @@ export async function loginUser({ email, password }, metadata = {}) {
         throw new Error('Invalid email or password');
     }
 
-    const payload = { id: user.id, email: user.email };
+    // If user was soft-deleted, restore them and mark as restored so caller can notify
+    let restored = false;
+    let effectiveUser = user;
+    if (user.deleted_at) {
+        try {
+            await usersService.restoreUser(user.id);
+            restored = true;
+            // re-fetch user after restore to get updated fields
+            effectiveUser = await db('users').where({ id: user.id }).first();
+        } catch (e) {
+            // if restore fails, continue with original user (authentication still allowed)
+            effectiveUser = user;
+        }
+    }
+
+    const payload = { id: effectiveUser.id, email: effectiveUser.email };
     const accessToken = generateAccessToken(payload);
 
     const refreshToken = await createRefreshTokenForUser(user.id, 30, metadata);
 
-    const safeUser = { id: user.id, email: user.email, name: user.name, avatar_url: user.avatar_url };
+    const safeUser = { id: effectiveUser.id, email: effectiveUser.email, name: effectiveUser.name, avatar_url: effectiveUser.avatar_url };
+    if (restored) safeUser.restored = true;
 
-    return { token: accessToken, refreshToken: refreshToken.token, refresh_expires_at: refreshToken.expires_at, user: safeUser };
+    return { token: accessToken, refreshToken: refreshToken.token, refresh_expires_at: refreshToken.expires_at, user: safeUser, restored };
 }
 
 export async function exchangeRefreshToken(cookieValue, rotate = true, metadata = {}) {
@@ -125,15 +142,32 @@ export async function exchangeRefreshToken(cookieValue, rotate = true, metadata 
 
     const accessToken = generateAccessToken({ id: user.id, email: user.email });
 
-    if (rotate) {
+    // auto-restore soft-deleted users on refresh
+    let restored = false;
+    let effectiveUser = user;
+    if (user.deleted_at) {
+        try {
+            await usersService.restoreUser(user.id);
+            restored = true;
+            effectiveUser = await db('users').where({ id: user.id }).first();
+        } catch (e) {
+            effectiveUser = user;
+        }
+    }
+
+        if (rotate) {
         const newRefresh = await createRefreshTokenForUser(user.id, 30, metadata);
         // mark old token as revoked and delete it (we set revoked flag and then delete the row to avoid reuse)
         await db('refresh_tokens').where({ selector: parsed.selector }).update({ revoked: true, revoked_at: new Date(), revoked_reason: 'rotated' });
         await db('refresh_tokens').where({ selector: parsed.selector }).del();
-        return { accessToken, user, refreshToken: newRefresh.token, refresh_expires_at: newRefresh.expires_at };
+            const safeUser = { id: effectiveUser.id, email: effectiveUser.email, name: effectiveUser.name, avatar_url: effectiveUser.avatar_url };
+            if (restored) safeUser.restored = true;
+            return { accessToken, user: safeUser, refreshToken: newRefresh.token, refresh_expires_at: newRefresh.expires_at, restored };
     }
 
-    return { accessToken, user };
+    const safeUser = { id: effectiveUser.id, email: effectiveUser.email, name: effectiveUser.name, avatar_url: effectiveUser.avatar_url };
+    if (restored) safeUser.restored = true;
+    return { accessToken, user: safeUser, restored };
 }
 
 export async function createOrFindUserByGoogle(profile) {

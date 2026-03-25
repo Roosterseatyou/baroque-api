@@ -12,5 +12,9 @@ router.delete('/:organizationId', authenticate, requireOrgRole(), orgsController
 router.post('/:organizationId/invite', authenticate, requireOrgRole(), orgsController.addMember);
 router.post('/:organizationId/remove', authenticate, requireOrgRole(), orgsController.removeMember);
 router.get('/:organizationId/members', authenticate, requireOrgRole(), orgsController.getMembers);
+// Restore soft-deleted organization
+router.post('/:organizationId/restore', authenticate, orgsController.restoreOrganization);
+// Hard delete (destructive) - authorized to admin secret or organization owner/admin/manager or original deleter
+router.post('/:organizationId/hard-delete', authenticate, orgsController.hardDeleteOrganization);
 
 export default router;

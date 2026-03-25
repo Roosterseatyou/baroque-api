@@ -67,7 +67,10 @@ export async function login(req, res) {
             debug.debugLog('auth.login: setting refresh cookie', { name: REFRESH_COOKIE_NAME, valueSnippet: (refreshToken || '').slice(0,8) + '...', options: cookieOpts });
         }
         res.cookie(REFRESH_COOKIE_NAME, refreshToken, cookieOpts);
-        res.status(200).json({ token, refresh_expires_at, user });
+        // Include a 'restored' flag if the login process restored a soft-deleted user
+        const resp = { token, refresh_expires_at, user };
+        if (typeof user?.restored !== 'undefined') resp.restored = user.restored === true;
+        res.status(200).json(resp);
     } catch (error) {
         res.status(401).json({ error: error.message });
     }
@@ -87,7 +90,11 @@ export async function refresh(req, res) {
             debug.debugLog('auth.refresh: setting refresh cookie (rotated)', { name: REFRESH_COOKIE_NAME, valueSnippet: (result.refreshToken || '').slice(0,8) + '...', options: cookieOpts });
         }
         res.cookie(REFRESH_COOKIE_NAME, result.refreshToken, cookieOpts);
-        res.status(200).json({ token: result.accessToken, user: { id: result.user.id, email: result.user.email, name: result.user.name, avatar_url: result.user.avatar_url } });
+        // Include a 'restored' flag when refresh restored a soft-deleted user
+        const respUser = { id: result.user.id, email: result.user.email, name: result.user.name, avatar_url: result.user.avatar_url };
+        const resp = { token: result.accessToken, user: respUser };
+        if (result.restored === true || result.user?.restored === true) resp.restored = true;
+        res.status(200).json(resp);
     } catch (error) {
         console.error('auth.refresh ERROR', error && error.message ? error.message : error)
         res.status(500).json({ error: error.message });

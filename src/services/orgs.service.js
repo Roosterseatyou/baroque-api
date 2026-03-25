@@ -37,6 +37,11 @@ export async function createOrganization({userId, name}) {
 }
 
 export async function getOrganizationById(organizationId) {
+    const organization = await db('organizations').where({ id: organizationId }).whereNull('deleted_at').first();
+    return organization;
+}
+
+export async function getOrganizationEvenIfDeleted(organizationId) {
     const organization = await db('organizations').where({ id: organizationId }).first();
     return organization;
 }
@@ -86,8 +91,56 @@ export async function updateOrganization(organizationId, { name }) {
     return updatedOrganization;
 }
 
-export async function deleteOrganization(organizationId) {
+export async function deleteOrganization(organizationId, performedBy = null) {
+    // Soft-delete organization by setting deleted_at so it can be restored later
+    // fetch existing org name for audit details
+    const org = await db('organizations').where({ id: organizationId }).first();
+    const orgName = org ? org.name : null;
+
     await db('organizations')
         .where({ id: organizationId })
-        .del();
+        .update({ deleted_at: db.fn.now(), updated_at: db.fn.now(), deleted_by: performedBy || null });
+    // record audit entry for soft-delete, include performing user and org name if available
+    await import('./audit.service.js').then(a => a.writeAudit({ entityType: 'organization', entityId: organizationId, action: 'organization_soft_deleted', details: orgName ? { name: orgName } : null, performedBy: performedBy || null }));
 }
+
+export async function restoreOrganization(organizationId) {
+    await db('organizations').where({ id: organizationId }).update({ deleted_at: null, updated_at: db.fn.now() });
+    await import('./audit.service.js').then(a => a.writeAudit({ entityType: 'organization', entityId: organizationId, action: 'organization_restored', details: null, performedBy: null }));
+}
+
+// Hard-delete an organization and cascade-delete all library-related data explicitly.
+// If a Knex transaction (trx) is provided it will be used so the deletions participate in the same transaction.
+export async function hardDeleteOrganization(organizationId, performedBy = null, trx = null) {
+    const q = trx || db;
+    // Delete child rows in order to avoid FK issues (safe even if FK cascade exists)
+    try {
+        // Find library ids for this organization
+        const libIdsQuery = q('libraries').where({ organization_id: organizationId }).select('id');
+
+        // Delete piece_tags where piece belongs to these libraries
+        await q('piece_tags').whereIn('piece_id', q('pieces').whereIn('library_id', libIdsQuery).select('id')).del();
+        // Delete piece_comments for pieces in these libraries
+        await q('piece_comments').whereIn('piece_id', q('pieces').whereIn('library_id', libIdsQuery).select('id')).del();
+        // Delete pieces
+        await q('pieces').whereIn('library_id', libIdsQuery).del();
+        // Delete tags and piece_tags referencing them (tags are per-library)
+        await q('piece_tags').whereIn('tag_id', q('tags').whereIn('library_id', libIdsQuery).select('id')).del();
+        await q('tags').whereIn('library_id', libIdsQuery).del();
+        // Delete library memberships
+        await q('library_memberships').whereIn('library_id', libIdsQuery).del();
+        // Delete libraries
+        await q('libraries').where({ organization_id: organizationId }).del();
+        // Delete organization memberships
+        await q('organization_memberships').where({ organization_id: organizationId }).del();
+        // Finally delete the organization row
+        await q('organizations').where({ id: organizationId }).del();
+
+        // Write audit entry for hard delete (include performer if provided)
+        await import('./audit.service.js').then(a => a.writeAudit({ entityType: 'organization', entityId: organizationId, action: 'organization_deleted_hard', details: null, performedBy: performedBy || null }, trx));
+    } catch (err) {
+        // rethrow so callers can handle
+        throw err;
+    }
+}
+
