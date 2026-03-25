@@ -121,16 +121,38 @@ export async function callback(req, res) {
         const metadata = { ip: req.ip, userAgent: req.get('user-agent') }
         const refresh = await authService.createRefreshTokenForUser(userId, 30, metadata)
         const REFRESH_COOKIE_NAME = 'refresh_token'
-        const REFRESH_COOKIE_OPTIONS = {
-          httpOnly: true,
-          secure: process.env.NODE_ENV === 'production',
-          // Allow cross-site set-cookie on OAuth redirect in production
-          sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
-          // Use '/' so SPA can POST /auth/refresh and browser will include the cookie reliably
-          path: '/'
+        // Add per-request cookie options for refresh token to ensure cookie is set in local vs prod
+        // Helper: build effective refresh cookie options for this request (local vs prod)
+        function buildRefreshCookieOptions(frontendOrigin) {
+          const isLocal = frontendOrigin && (frontendOrigin.includes('localhost') || frontendOrigin.includes('127.0.0.1')) || process.env.NODE_ENV !== 'production';
+          const opts = {
+              httpOnly: true,
+              secure: process.env.NODE_ENV === 'production',
+              sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+              path: '/',
+          };
+          if (isLocal) {
+              opts.sameSite = 'lax';
+              opts.secure = false;
+          } else {
+              opts.sameSite = 'none';
+              opts.secure = true;
+          }
+          return opts;
         }
-        try { res.cookie(REFRESH_COOKIE_NAME, refresh.token, REFRESH_COOKIE_OPTIONS) } catch (e) { console.warn('Failed to set refresh cookie', e && e.message) }
-        debug.debugLog('google.callback: set refresh cookie for user', userId)
+        try {
+          const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || 'http://localhost:5173';
+          const cookieOpts = buildRefreshCookieOptions(FRONTEND_ORIGIN);
+          if (process.env.DEBUG_OAUTH === 'true') {
+            debug.debugLog('google.callback: setting refresh cookie', { name: REFRESH_COOKIE_NAME, valueSnippet: (refresh.token || '').slice(0,8) + '...', options: cookieOpts, userId });
+          }
+          res.cookie(REFRESH_COOKIE_NAME, refresh.token, cookieOpts);
+        } catch (e) {
+          console.warn('Failed to set refresh cookie', e && e.message)
+        }
+        if (process.env.DEBUG_OAUTH === 'true') {
+          debug.debugLog('google.callback: set refresh cookie for user', userId)
+        }
       } catch (e) {
         console.warn('Failed to create server refresh token after google callback', e && e.message)
       }
