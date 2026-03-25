@@ -9,10 +9,6 @@ router.get('/authorize', authenticate, googleController.authorize)
 router.get('/callback', googleController.callback)
 router.get('/status', authenticate, googleController.status)
 
-// API endpoints to list and fetch spreadsheets
-router.get('/files', authenticate, googleController.listFiles)
-router.get('/sheets/:fileId/metadata', authenticate, googleController.getMetadata)
-router.get('/sheets/:fileId/values', authenticate, googleController.getValues)
 
 // Dev-only debug endpoint to inspect stored oauth_info (masked)
 router.get('/debug', authenticate, googleController.debugInfo)

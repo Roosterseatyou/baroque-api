@@ -98,9 +98,105 @@ export async function updateOrganization(req, res) {
 
 export async function deleteOrganization(req, res) {
     try {
-        await orgsService.deleteOrganization(req.params.organizationId);
+        const performer = req.user && req.user.id || null;
+        await orgsService.deleteOrganization(req.params.organizationId, performer);
         res.status(204).send();
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
 }
+
+export async function restoreOrganization(req, res) {
+    try {
+        const requesterId = req.user && req.user.id;
+        const orgId = req.params.organizationId;
+        // Allow org member with sufficient role or admin secret
+        const adminSecret = req.get('X-ADMIN-SECRET') || process.env.ADMIN_SECRET;
+        if (adminSecret && process.env.ADMIN_SECRET && adminSecret === process.env.ADMIN_SECRET) {
+            await orgsService.restoreOrganization(orgId);
+            return res.status(200).json({ success: true });
+        }
+        // Otherwise require a role in the organization
+            const membership = await orgsService.getMembershipForUser(orgId, requesterId);
+            if (membership) {
+                if (!['admin', 'owner', 'manager'].includes(membership.role)) return res.status(403).json({ error: 'Forbidden' });
+                await orgsService.restoreOrganization(orgId);
+                return res.status(200).json({ success: true });
+            }
+
+            // Not a current member: if requester is the original deleter, allow restore
+            try {
+                const orgRow = await orgsService.getOrganizationEvenIfDeleted(orgId);
+                if (orgRow && orgRow.deleted_by && orgRow.deleted_by === requesterId) {
+                    await orgsService.restoreOrganization(orgId);
+                    return res.status(200).json({ success: true });
+                }
+                // Fallback: check audit_logs for an entry where performed_by = requesterId
+                        const knex = (await import('../config/knex.js')).default;
+                        const audit = await knex('audit_logs')
+                            .where({ action: 'organization_soft_deleted', entity_id: orgId })
+                            .andWhere(function () {
+                                this.where({ performed_by: requesterId }).orWhere('details', 'like', `%${requesterId}%`)
+                            })
+                            .first();
+                if (audit) {
+                    await orgsService.restoreOrganization(orgId);
+                    return res.status(200).json({ success: true });
+                }
+            } catch (e) {
+                // continue to forbidden below
+            }
+
+            return res.status(403).json({ error: 'Forbidden' });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+}
+
+export async function hardDeleteOrganization(req, res) {
+    try {
+        const requesterId = req.user && req.user.id;
+        const orgId = req.params.organizationId;
+        const adminSecret = req.get('X-ADMIN-SECRET') || process.env.ADMIN_SECRET;
+        // admin secret may authorize hard delete
+        if (adminSecret && process.env.ADMIN_SECRET && adminSecret === process.env.ADMIN_SECRET) {
+            await orgsService.hardDeleteOrganization(orgId, null);
+            return res.status(200).json({ success: true });
+        }
+
+        // require membership with sufficient role if present
+        const membership = await orgsService.getMembershipForUser(orgId, requesterId);
+        if (membership) {
+            if (!['admin', 'owner', 'manager'].includes(membership.role)) return res.status(403).json({ error: 'Forbidden' });
+            await orgsService.hardDeleteOrganization(orgId, requesterId);
+            return res.status(200).json({ success: true });
+        }
+
+        // Not a current member: allow original deleter to hard-delete (check deleted_by or audit)
+        try {
+            const orgRow = await orgsService.getOrganizationEvenIfDeleted(orgId);
+            if (orgRow && orgRow.deleted_by && orgRow.deleted_by === requesterId) {
+                await orgsService.hardDeleteOrganization(orgId, requesterId);
+                return res.status(200).json({ success: true });
+            }
+            const knex = (await import('../config/knex.js')).default;
+            const audit = await knex('audit_logs')
+                .where({ action: 'organization_soft_deleted', entity_id: orgId })
+                .andWhere(function () {
+                    this.where({ performed_by: requesterId }).orWhere('details', 'like', `%${requesterId}%`)
+                })
+                .first();
+            if (audit) {
+                await orgsService.hardDeleteOrganization(orgId, requesterId);
+                return res.status(200).json({ success: true });
+            }
+        } catch (e) {
+            // continue to forbidden
+        }
+
+        return res.status(403).json({ error: 'Forbidden' });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+}
+

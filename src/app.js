@@ -13,12 +13,22 @@ import db from './config/knex.js';
 
 const app = express();
 
-// Allow frontend origin (use FRONTEND_ORIGIN env var in dev if needed)
-const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || 'http://localhost:5173';
-app.use(cors({ origin: FRONTEND_ORIGIN, credentials: true }));
+// Allow frontend origin and api origin
+const allowedOrigins = [process.env.FRONTEND_ORIGIN, process.env.API_ORIGIN].filter(Boolean);
+app.use(cors({
+    origin: allowedOrigins,
+    credentials: true
+}));
 
 app.use(cookieParser());
-app.use(express.json());
+// Allow configuring the maximum request body size via env var. Defaults to 1mb which
+// is larger than the body-parser default and should prevent PayloadTooLargeError for
+// typical JSON requests. Set REQUEST_BODY_LIMIT (e.g. '10mb') in your environment
+// if you expect larger payloads (file uploads should use multipart/form-data instead).
+const REQUEST_BODY_LIMIT = process.env.REQUEST_BODY_LIMIT || '1mb';
+app.use(express.json({ limit: REQUEST_BODY_LIMIT }));
+// Also support urlencoded payloads (forms) with the same limit
+app.use(express.urlencoded({ extended: true, limit: REQUEST_BODY_LIMIT }));
 
 // health check
 app.get('/', (req, res) => res.json({ status: 'ok' }));
@@ -39,7 +49,16 @@ app.use('/organizations', orgsRoutes);
 app.use('/libraries', librariesRoutes);
 app.use('/pieces', piecesRoutes);
 app.use('/scrape', scrapeRoutes);
-app.use('/integrations/google', googleRoutes);
+// Mount integrations routes only when explicitly enabled. The frontend login/signup
+// flow uses the auth routes (`/auth/google`), so by default we keep integrations
+// disabled to avoid confusion now that Drive/Sheets integrations were removed.
+const ENABLE_GOOGLE_INTEGRATION = process.env.ENABLE_GOOGLE_INTEGRATION === 'true';
+if (ENABLE_GOOGLE_INTEGRATION) {
+    app.use('/integrations/google', googleRoutes);
+    console.log('Google integration routes enabled at /integrations/google');
+} else {
+    console.log('Google integration routes are disabled (ENABLE_GOOGLE_INTEGRATION!=true). Use /auth/google for login/signup.');
+}
 
 // Optional autofill/search routes (mount only when ENABLE_AUTOFILL=true)
 if (process.env.ENABLE_AUTOFILL === 'true') {
@@ -53,5 +72,20 @@ if (process.env.ENABLE_AUTOFILL === 'true') {
         }
     })();
 }
+
+// Generic error handler to convert body-parser / raw-body size errors into a clear
+// 413 Payload Too Large response. This should be registered after the body parsers
+// and route mounts so it catches parsing errors early.
+app.use((err, req, res, next) => {
+    if (!err) return next();
+    // raw-body throws a 'PayloadTooLargeError' (type from http-errors) when the
+    // request body exceeds the configured limit. Normalize into a 413 response.
+    if (err.type === 'entity.too.large' || err.type === 'request.entity.too.large' || err.status === 413 || err.statusCode === 413) {
+        console.warn('Request body too large:', err && err.message ? err.message : err);
+        return res.status(413).json({ error: 'PayloadTooLargeError', message: 'Request entity too large' });
+    }
+    // pass other errors along
+    return next(err);
+});
 
 export default app;

@@ -25,9 +25,7 @@ export async function authorize(req, res) {
     const DEFAULT_SCOPES = [
       'openid',
       'email',
-      'profile',
-      'https://www.googleapis.com/auth/drive.readonly',
-      'https://www.googleapis.com/auth/spreadsheets.readonly'
+      'profile'
     ]
     const raw = process.env.GOOGLE_OAUTH_SCOPES || DEFAULT_SCOPES.join(' ')
     // For integrations/linking flow, allow include_granted_scopes=true so existing grants are honored
@@ -123,16 +121,38 @@ export async function callback(req, res) {
         const metadata = { ip: req.ip, userAgent: req.get('user-agent') }
         const refresh = await authService.createRefreshTokenForUser(userId, 30, metadata)
         const REFRESH_COOKIE_NAME = 'refresh_token'
-        const REFRESH_COOKIE_OPTIONS = {
-          httpOnly: true,
-          secure: process.env.NODE_ENV === 'production',
-          // Allow cross-site set-cookie on OAuth redirect in production
-          sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
-          // Use '/' so SPA can POST /auth/refresh and browser will include the cookie reliably
-          path: '/'
+        // Add per-request cookie options for refresh token to ensure cookie is set in local vs prod
+        // Helper: build effective refresh cookie options for this request (local vs prod)
+        function buildRefreshCookieOptions(frontendOrigin) {
+          const isLocal = frontendOrigin && (frontendOrigin.includes('localhost') || frontendOrigin.includes('127.0.0.1')) || process.env.NODE_ENV !== 'production';
+          const opts = {
+              httpOnly: true,
+              secure: process.env.NODE_ENV === 'production',
+              sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+              path: '/',
+          };
+          if (isLocal) {
+              opts.sameSite = 'lax';
+              opts.secure = false;
+          } else {
+              opts.sameSite = 'none';
+              opts.secure = true;
+          }
+          return opts;
         }
-        try { res.cookie(REFRESH_COOKIE_NAME, refresh.token, REFRESH_COOKIE_OPTIONS) } catch (e) { console.warn('Failed to set refresh cookie', e && e.message) }
-        debug.debugLog('google.callback: set refresh cookie for user', userId)
+        try {
+          const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || 'http://localhost:5173';
+          const cookieOpts = buildRefreshCookieOptions(FRONTEND_ORIGIN);
+          if (process.env.DEBUG_OAUTH === 'true') {
+            debug.debugLog('google.callback: setting refresh cookie', { name: REFRESH_COOKIE_NAME, valueSnippet: (refresh.token || '').slice(0,8) + '...', options: cookieOpts, userId });
+          }
+          res.cookie(REFRESH_COOKIE_NAME, refresh.token, cookieOpts);
+        } catch (e) {
+          console.warn('Failed to set refresh cookie', e && e.message)
+        }
+        if (process.env.DEBUG_OAUTH === 'true') {
+          debug.debugLog('google.callback: set refresh cookie for user', userId)
+        }
       } catch (e) {
         console.warn('Failed to create server refresh token after google callback', e && e.message)
       }
@@ -153,65 +173,9 @@ export async function callback(req, res) {
   }
 }
 
-export async function listFiles(req, res) {
-  try {
-    const userId = req.user && req.user.id
-    if (!userId) return res.status(401).json({ error: 'Unauthorized' })
-    const files = await googleService.listSpreadsheetsForUser(userId)
-    res.json(files)
-  } catch (err) {
-    // log detailed error for debugging
-    console.error('google.listFiles error - details:', {
-      message: err && err.message,
-      stack: err && err.stack,
-      code: err && err.code,
-      response: err && err.response && err.response.data ? err.response.data : undefined
-    })
-
-    // If service threw a clear "Google not connected" error
-    const msg = String(err && err.message || '').toLowerCase()
-    if (msg.includes('google not connected') || msg.includes('not connected')) {
-      return res.status(400).json({ error: 'Google not connected for this user. Please connect Google.' })
-    }
-
-    // If the error indicates insufficient scopes or a 403 from Google, return 403 with actionable message
-    if (err && (err.code === 403 || (err.response && err.response.status === 403) || msg.includes('insufficient') || msg.includes('drive') || msg.includes('sheets'))) {
-      return res.status(403).json({ error: 'Google authorization missing required Drive/Sheets scopes. Please reconnect and grant Drive and Sheets access.' })
-    }
-
-    // fallback
-    res.status(500).json({ error: err.message || 'Failed to list Google sheets' })
-  }
-}
-
-export async function getMetadata(req, res) {
-  try {
-    const userId = req.user && req.user.id
-    const { fileId } = req.params
-    if (!userId) return res.status(401).json({ error: 'Unauthorized' })
-    if (!fileId) return res.status(400).json({ error: 'fileId required' })
-    const meta = await googleService.getSpreadsheetMetadata(userId, fileId)
-    res.json(meta)
-  } catch (err) {
-    console.error('google.getMetadata error', err && err.stack ? err.stack : err)
-    res.status(500).json({ error: err.message })
-  }
-}
-
-export async function getValues(req, res) {
-  try {
-    const userId = req.user && req.user.id
-    const { fileId } = req.params
-    const range = req.query.range || req.body.range || ''
-    if (!userId) return res.status(401).json({ error: 'Unauthorized' })
-    if (!fileId) return res.status(400).json({ error: 'fileId required' })
-    const values = await googleService.getSpreadsheetValues(userId, fileId, range)
-    res.json(values)
-  } catch (err) {
-    console.error('google.getValues error', err && err.stack ? err.stack : err)
-    res.status(500).json({ error: err.message })
-  }
-}
+// Spreadsheet listing and fetching endpoints were removed to comply with reduced
+// Google OAuth scopes (no Drive/Sheets access). The rest of the OAuth flow
+// (authorize, callback, token persistence) remains functional for Google sign-in.
 
 export async function status(req, res) {
   try {
