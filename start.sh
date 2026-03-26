@@ -11,6 +11,9 @@ cd "$SCRIPT_DIR"
 
 echo "Startup script running from $SCRIPT_DIR"
 
+# Debug: print key env vars so we can see what Pterodactyl provided
+echo "ENV: MAIN_FILE='${MAIN_FILE:-}' START_BOTH='${START_BOTH:-}' DISABLE_WORKER='${DISABLE_WORKER:-}' AUTO_UPDATE='${AUTO_UPDATE:-}'"
+
 # --- Auto-update / install logic (env-driven) ---
 # Expected env vars: GIT_ADDRESS, BRANCH, AUTO_UPDATE ("1" to enable),
 # NODE_PACKAGES (space-separated packages to install), UNNODE_PACKAGES (to uninstall)
@@ -52,102 +55,60 @@ fi
 # - If MAIN_FILE is not provided, start worker in background and run the builtin server (src/server.js) in foreground.
 
 start_worker_bg() {
-  echo "Starting duplicate-scan worker in background (nohup)..."
+  echo "Starting duplicate-scan worker in background..."
   # redirect worker stdout/stderr to container stdout/stderr so logs appear in console
-  nohup node ./src/worker/dupWorker.js > /dev/stdout 2> /dev/stderr &
-  WORKER_PID=$!
+  if command -v nohup >/dev/null 2>&1; then
+    nohup node ./src/worker/dupWorker.js > /dev/stdout 2> /dev/stderr &
+    WORKER_PID=$!
+  elif command -v setsid >/dev/null 2>&1; then
+    setsid node ./src/worker/dupWorker.js > /dev/stdout 2> /dev/stderr &
+    WORKER_PID=$!
+  else
+    # fallback: simple backgrounded node with redirected output
+    node ./src/worker/dupWorker.js > /dev/stdout 2> /dev/stderr &
+    WORKER_PID=$!
+  fi
+  echo "Worker started with PID $WORKER_PID"
 }
 
 if [ -n "${MAIN_FILE:-}" ]; then
-  # If MAIN_FILE is set but START_BOTH is not explicitly provided, and
-  # MAIN_FILE points to the bundled server (e.g. src/server.js), default
-  # to starting both the server and the worker. This helps Pterodactyl
-  # setups that set MAIN_FILE=src/server.js by default.
-  # Treat empty or unset START_BOTH as not provided; default to starting both when MAIN_FILE looks like the API server
-  if [ -z "${START_BOTH:-}" ]; then
-    if echo "$MAIN_FILE" | grep -E '(^|/)(src/)?server\.js$' >/dev/null 2>&1; then
-      echo "Detected MAIN_FILE=${MAIN_FILE} looks like the API server — defaulting START_BOTH=1"
-      START_BOTH=1
-    fi
-  fi
-  # MAIN_FILE set
-  if [ "${START_BOTH:-0}" = "1" ]; then
-    # start worker, then run main file as foreground server
-    start_worker_bg
-    echo "MAIN_FILE is set and START_BOTH=1 — running ${MAIN_FILE} as server (foreground)"
-    MAIN_PATH="$MAIN_FILE"
-    case "$MAIN_FILE" in
-      /*) MAIN_PATH="$MAIN_FILE" ;;
-      *) MAIN_PATH="$SCRIPT_DIR/$MAIN_FILE" ;;
-    esac
-    trap 'echo "Shutting down worker..."; kill -TERM "$WORKER_PID" 2>/dev/null || true; wait "$WORKER_PID" 2>/dev/null || true; exit 0' INT TERM
-    if echo "$MAIN_FILE" | grep -E '\.js$' >/dev/null 2>&1; then
-      /usr/local/bin/node "$MAIN_PATH" ${NODE_ARGS:-}
-      EXIT_CODE=$?
-      echo "Server process exited with code $EXIT_CODE"
-      # ensure worker is stopped
-      if kill -0 "$WORKER_PID" 2>/dev/null; then kill -TERM "$WORKER_PID" 2>/dev/null || true; fi
-      wait "$WORKER_PID" 2>/dev/null || true
-      exit $EXIT_CODE
-    else
-      if command -v ts-node >/dev/null 2>&1; then
-        ts-node --esm "$MAIN_PATH" ${NODE_ARGS:-}
-        EXIT_CODE=$?
-        echo "Server (ts-node) exited with code $EXIT_CODE"
-        if kill -0 "$WORKER_PID" 2>/dev/null; then kill -TERM "$WORKER_PID" 2>/dev/null || true; fi
-        wait "$WORKER_PID" 2>/dev/null || true
-        exit $EXIT_CODE
-      else
-        /usr/local/bin/node "$MAIN_PATH" ${NODE_ARGS:-}
-        EXIT_CODE=$?
-        echo "Fallback server exited with code $EXIT_CODE"
-        if kill -0 "$WORKER_PID" 2>/dev/null; then kill -TERM "$WORKER_PID" 2>/dev/null || true; fi
-        wait "$WORKER_PID" 2>/dev/null || true
-        exit $EXIT_CODE
-      fi
-    fi
+  # Start the worker unless explicitly disabled via DISABLE_WORKER.
+  if echo "${DISABLE_WORKER:-}" | grep -E '^(1|true|yes|on)$' >/dev/null 2>&1; then
+    echo "DISABLE_WORKER is set; not starting worker"
   else
-    # legacy: run MAIN_FILE only (no worker)
-    echo "MAIN_FILE is set and START_BOTH!=1 — running custom main file only"
-    MAIN_PATH="$MAIN_FILE"
-    case "$MAIN_FILE" in
-      /*) MAIN_PATH="$MAIN_FILE" ;;
-      *) MAIN_PATH="$SCRIPT_DIR/$MAIN_FILE" ;;
-    esac
+    echo "Starting worker in background (DISABLE_WORKER not set)"
+    start_worker_bg
+  fi
+
+  # MAIN_FILE set — run it in foreground (worker already started unless disabled)
+  echo "MAIN_FILE is set — running ${MAIN_FILE} as server (foreground)"
+  MAIN_PATH="$MAIN_FILE"
+  case "$MAIN_FILE" in
+    /*) MAIN_PATH="$MAIN_FILE" ;;
+    *) MAIN_PATH="$SCRIPT_DIR/$MAIN_FILE" ;;
+  esac
+  trap 'echo "Shutting down worker..."; kill -TERM "$WORKER_PID" 2>/dev/null || true; wait "$WORKER_PID" 2>/dev/null || true; exit 0' INT TERM
     if echo "$MAIN_FILE" | grep -E '\.js$' >/dev/null 2>&1; then
-      /usr/local/bin/node "$MAIN_PATH" ${NODE_ARGS:-}
-      EXIT_CODE=$?
-      echo "Custom main process exited with code $EXIT_CODE"
-      exit $EXIT_CODE
+      echo "Execing node ${MAIN_PATH} ${NODE_ARGS:-}"
+      exec node "$MAIN_PATH" ${NODE_ARGS:-}
     else
       if command -v ts-node >/dev/null 2>&1; then
-        ts-node --esm "$MAIN_PATH" ${NODE_ARGS:-}
-        EXIT_CODE=$?
-        echo "Custom ts-node process exited with code $EXIT_CODE"
-        exit $EXIT_CODE
+        echo "Execing ts-node ${MAIN_PATH} ${NODE_ARGS:-}"
+        exec ts-node --esm "$MAIN_PATH" ${NODE_ARGS:-}
       else
-        /usr/local/bin/node "$MAIN_PATH" ${NODE_ARGS:-}
-        EXIT_CODE=$?
-        echo "Fallback node process exited with code $EXIT_CODE"
-        exit $EXIT_CODE
+        echo "Execing node (fallback) ${MAIN_PATH} ${NODE_ARGS:-}"
+        exec node "$MAIN_PATH" ${NODE_ARGS:-}
       fi
     fi
-  fi
 else
   # Default: start worker background and run built-in server in foreground
   start_worker_bg
   echo "Starting API server (foreground)..."
   API_PID=0
   trap 'echo "Received signal, shutting down..."; if kill -0 "$WORKER_PID" 2>/dev/null; then kill -TERM "$WORKER_PID" 2>/dev/null || true; fi; wait "$WORKER_PID" 2>/dev/null || true; exit 0' INT TERM
-  # run server in foreground (no ampersand) so this script remains the parent and can clean up the worker
-  /usr/local/bin/node ./src/server.js
-  EXIT_CODE=$?
-  echo "API server exited with code $EXIT_CODE"
-  if kill -0 "$WORKER_PID" 2>/dev/null; then
-    kill -TERM "$WORKER_PID" 2>/dev/null || true
-  fi
-  wait "$WORKER_PID" 2>/dev/null || true
-  exit $EXIT_CODE
+  # run server in foreground (exec so the node process replaces this shell)
+  echo "Execing node ./src/server.js"
+  exec node ./src/server.js
 fi
 
 # Forward SIGINT/SIGTERM to children and wait for graceful shutdown
