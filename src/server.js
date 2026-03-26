@@ -1,6 +1,7 @@
 import app from "./app.js";
 import knex from "./config/knex.js";
 import dotenv from "dotenv";
+import * as dupQueue from './services/dupQueue.service.js';
 
 dotenv.config();
 
@@ -129,10 +130,31 @@ async function init() {
       console.log(`Server is running on ${LISTEN_HOST}:${PORT}`);
       printRoutes(app);
     });
-
+    // Background poller for duplicate scan jobs can be run inline in this process
+    // but CPU-heavy scans should run in a separate worker process to avoid
+    // blocking the main HTTP server. To enable inline polling set RUN_DUP_QUEUE_INLINE=true
+    const RUN_INLINE = String(process.env.RUN_DUP_QUEUE_INLINE || '').toLowerCase() === 'true';
+    if (RUN_INLINE) {
+      console.log('Starting inline duplicate-scan poller (RUN_DUP_QUEUE_INLINE=true)');
+      const POLL_INTERVAL_MS = Number(process.env.DUP_QUEUE_POLL_MS || 30000);
+      let poller = setInterval(async () => {
+        try {
+          const processed = await dupQueue.processPendingJobs({ limit: 5 });
+          if (processed > 0) console.log(`Processed ${processed} duplicate scan job(s)`);
+        } catch (e) {
+          console.error('Error running duplicate scan job processor:', e);
+        }
+      }, POLL_INTERVAL_MS);
+      // clear poller on shutdown
+      process.on('SIGINT', () => { if (poller) clearInterval(poller); });
+      process.on('SIGTERM', () => { if (poller) clearInterval(poller); });
+    } else {
+      console.log('Duplicate-scan poller not started in-process. Run `npm run worker` to start the separate worker.');
+    }
     const shutdown = async () => {
         console.log("Shutting down server...");
         server.close(async () => {});
+        if (poller) clearInterval(poller);
         try { await knex.destroy(); } catch (e) { /* ignore */ }
         console.log("Server shut down complete.");
         process.exit(0);
