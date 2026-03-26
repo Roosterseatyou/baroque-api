@@ -14,6 +14,15 @@ echo "Startup script running from $SCRIPT_DIR"
 # Debug: print key env vars so we can see what Pterodactyl provided
 echo "ENV: MAIN_FILE='${MAIN_FILE:-}' START_BOTH='${START_BOTH:-}' DISABLE_WORKER='${DISABLE_WORKER:-}' AUTO_UPDATE='${AUTO_UPDATE:-}'"
 
+# If RUN_DUP_QUEUE_INLINE is set to true/1, the API process will run the poller
+# so we should NOT start a separate background worker process to avoid duplicates.
+if [ "${RUN_DUP_QUEUE_INLINE:-}" = "true" ] || [ "${RUN_DUP_QUEUE_INLINE:-}" = "1" ]; then
+  echo "RUN_DUP_QUEUE_INLINE=true — inline poller enabled; background worker will not be started by start.sh unless DISABLE_WORKER is explicitly unset"
+  RUN_INLINE=1
+else
+  RUN_INLINE=0
+fi
+
 # --- Auto-update / install logic (env-driven) ---
 # Expected env vars: GIT_ADDRESS, BRANCH, AUTO_UPDATE ("1" to enable),
 # NODE_PACKAGES (space-separated packages to install), UNNODE_PACKAGES (to uninstall)
@@ -73,7 +82,9 @@ start_worker_bg() {
 
 if [ -n "${MAIN_FILE:-}" ]; then
   # Start the worker unless explicitly disabled via DISABLE_WORKER.
-  if echo "${DISABLE_WORKER:-}" | grep -E '^(1|true|yes|on)$' >/dev/null 2>&1; then
+  if [ "$RUN_INLINE" = "1" ]; then
+    echo "RUN_DUP_QUEUE_INLINE enabled — skipping starting separate background worker"
+  elif echo "${DISABLE_WORKER:-}" | grep -E '^(1|true|yes|on)$' >/dev/null 2>&1; then
     echo "DISABLE_WORKER is set; not starting worker"
   else
     echo "Starting worker in background (DISABLE_WORKER not set)"

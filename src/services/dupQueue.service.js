@@ -42,7 +42,36 @@ export async function processPendingJobs({ limit = 5 } = {}) {
     // mark as running
     await db('duplicate_scan_jobs').where({ id: j.id, status: 'pending' }).update({ status: 'running', started_at: db.fn.now(), attempts: j.attempts + 1, updated_at: db.fn.now() });
     try {
-      const groups = await piecesService.findDuplicatesInLibrary(j.library_id);
+      // Use worker_threads if available to avoid blocking main thread when run inline
+      let groups;
+      let WorkerImpl = null;
+      try {
+        const mod = await import('worker_threads');
+        WorkerImpl = mod.Worker;
+      } catch (e) {
+        WorkerImpl = null;
+      }
+
+      if (WorkerImpl) {
+        // spawn a worker to perform the expensive operation
+        groups = await new Promise((resolve, reject) => {
+          const w = new WorkerImpl(new URL('../worker/findDuplicatesWorker.js', import.meta.url), { workerData: { libraryId: j.library_id } });
+          const timeout = Number(process.env.DUP_WORKER_TIMEOUT_MS || 5 * 60 * 1000);
+          let timer = setTimeout(() => {
+            try { w.terminate(); } catch (e) {}
+            reject(new Error('Worker timed out'));
+          }, timeout);
+          w.on('message', (m) => {
+            clearTimeout(timer);
+            if (m && m.success) resolve(m.groups);
+            else reject(new Error(m && m.error ? m.error : 'Worker failed'));
+          });
+          w.on('error', (err) => { clearTimeout(timer); reject(err); });
+          w.on('exit', (code) => { if (code !== 0) { clearTimeout(timer); /* handled in error handler */ } });
+        });
+      } else {
+        groups = await piecesService.findDuplicatesInLibrary(j.library_id);
+      }
       // sanitize groups before persisting to DB
       const sanitized = sanitizeGroups(groups);
       await db('duplicate_scan_jobs').where({ id: j.id }).update({ status: 'done', result: JSON.stringify(sanitized), cached_at: Date.now(), finished_at: db.fn.now(), updated_at: db.fn.now() });

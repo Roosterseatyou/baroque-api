@@ -137,9 +137,10 @@ async function init() {
     if (RUN_INLINE) {
       console.log('Starting inline duplicate-scan poller (RUN_DUP_QUEUE_INLINE=true)');
       const POLL_INTERVAL_MS = Number(process.env.DUP_QUEUE_POLL_MS || 30000);
+      const DUP_QUEUE_LIMIT = Number(process.env.DUP_QUEUE_LIMIT || 5);
       let poller = setInterval(async () => {
         try {
-          const processed = await dupQueue.processPendingJobs({ limit: 5 });
+          const processed = await dupQueue.processPendingJobs({ limit: DUP_QUEUE_LIMIT });
           if (processed > 0) console.log(`Processed ${processed} duplicate scan job(s)`);
         } catch (e) {
           console.error('Error running duplicate scan job processor:', e);
