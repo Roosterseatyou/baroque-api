@@ -46,47 +46,98 @@ if [ -f package.json ]; then
 fi
 
 # --- Start processes ---
-# If MAIN_FILE is provided, run it instead of starting the default API + worker
-if [ -n "${MAIN_FILE:-}" ]; then
-  echo "MAIN_FILE is set to '${MAIN_FILE}' — running custom main file"
-  # prefer the SCRIPT_DIR as base if MAIN_FILE is a relative path
-  MAIN_PATH="$MAIN_FILE"
-  case "$MAIN_FILE" in
-    /*) MAIN_PATH="$MAIN_FILE" ;; # absolute path — use as-is
-    *) MAIN_PATH="$SCRIPT_DIR/$MAIN_FILE" ;; # relative to script dir
-  esac
+# Behavior:
+# - If MAIN_FILE is provided and START_BOTH=1, start worker in background and run MAIN_FILE as the server in foreground.
+# - If MAIN_FILE is provided and START_BOTH!=1, run MAIN_FILE (legacy behavior) and do not start worker.
+# - If MAIN_FILE is not provided, start worker in background and run the builtin server (src/server.js) in foreground.
 
-  if echo "$MAIN_FILE" | grep -E '\.js$' >/dev/null 2>&1; then
-    echo "Running node ${MAIN_PATH} ${NODE_ARGS:-}"
-    /usr/local/bin/node "$MAIN_PATH" ${NODE_ARGS:-}
-    EXIT_CODE=$?
-    echo "Custom main process exited with code $EXIT_CODE"
-    exit $EXIT_CODE
-  else
-    echo "Running ts-node (ESM) ${MAIN_PATH} ${NODE_ARGS:-}"
-    # attempt to run via ts-node; fall back to node if ts-node not present
-    if command -v ts-node >/dev/null 2>&1; then
-      ts-node --esm "$MAIN_PATH" ${NODE_ARGS:-}
-      EXIT_CODE=$?
-      echo "Custom ts-node process exited with code $EXIT_CODE"
-      exit $EXIT_CODE
-    else
-      echo "ts-node not available; attempting to run with node"
+start_worker_bg() {
+  echo "Starting duplicate-scan worker in background (nohup)..."
+  # redirect worker stdout/stderr to container stdout/stderr so logs appear in console
+  nohup node ./src/worker/dupWorker.js > /dev/stdout 2> /dev/stderr &
+  WORKER_PID=$!
+}
+
+if [ -n "${MAIN_FILE:-}" ]; then
+  # MAIN_FILE set
+  if [ "${START_BOTH:-0}" = "1" ]; then
+    # start worker, then run main file as foreground server
+    start_worker_bg
+    echo "MAIN_FILE is set and START_BOTH=1 — running ${MAIN_FILE} as server (foreground)"
+    MAIN_PATH="$MAIN_FILE"
+    case "$MAIN_FILE" in
+      /*) MAIN_PATH="$MAIN_FILE" ;;
+      *) MAIN_PATH="$SCRIPT_DIR/$MAIN_FILE" ;;
+    esac
+    trap 'echo "Shutting down worker..."; kill -TERM "$WORKER_PID" 2>/dev/null || true; wait "$WORKER_PID" 2>/dev/null || true; exit 0' INT TERM
+    if echo "$MAIN_FILE" | grep -E '\.js$' >/dev/null 2>&1; then
       /usr/local/bin/node "$MAIN_PATH" ${NODE_ARGS:-}
       EXIT_CODE=$?
-      echo "Fallback node process exited with code $EXIT_CODE"
+      echo "Server process exited with code $EXIT_CODE"
+      # ensure worker is stopped
+      if kill -0 "$WORKER_PID" 2>/dev/null; then kill -TERM "$WORKER_PID" 2>/dev/null || true; fi
+      wait "$WORKER_PID" 2>/dev/null || true
       exit $EXIT_CODE
+    else
+      if command -v ts-node >/dev/null 2>&1; then
+        ts-node --esm "$MAIN_PATH" ${NODE_ARGS:-}
+        EXIT_CODE=$?
+        echo "Server (ts-node) exited with code $EXIT_CODE"
+        if kill -0 "$WORKER_PID" 2>/dev/null; then kill -TERM "$WORKER_PID" 2>/dev/null || true; fi
+        wait "$WORKER_PID" 2>/dev/null || true
+        exit $EXIT_CODE
+      else
+        /usr/local/bin/node "$MAIN_PATH" ${NODE_ARGS:-}
+        EXIT_CODE=$?
+        echo "Fallback server exited with code $EXIT_CODE"
+        if kill -0 "$WORKER_PID" 2>/dev/null; then kill -TERM "$WORKER_PID" 2>/dev/null || true; fi
+        wait "$WORKER_PID" 2>/dev/null || true
+        exit $EXIT_CODE
+      fi
+    fi
+  else
+    # legacy: run MAIN_FILE only (no worker)
+    echo "MAIN_FILE is set and START_BOTH!=1 — running custom main file only"
+    MAIN_PATH="$MAIN_FILE"
+    case "$MAIN_FILE" in
+      /*) MAIN_PATH="$MAIN_FILE" ;;
+      *) MAIN_PATH="$SCRIPT_DIR/$MAIN_FILE" ;;
+    esac
+    if echo "$MAIN_FILE" | grep -E '\.js$' >/dev/null 2>&1; then
+      /usr/local/bin/node "$MAIN_PATH" ${NODE_ARGS:-}
+      EXIT_CODE=$?
+      echo "Custom main process exited with code $EXIT_CODE"
+      exit $EXIT_CODE
+    else
+      if command -v ts-node >/dev/null 2>&1; then
+        ts-node --esm "$MAIN_PATH" ${NODE_ARGS:-}
+        EXIT_CODE=$?
+        echo "Custom ts-node process exited with code $EXIT_CODE"
+        exit $EXIT_CODE
+      else
+        /usr/local/bin/node "$MAIN_PATH" ${NODE_ARGS:-}
+        EXIT_CODE=$?
+        echo "Fallback node process exited with code $EXIT_CODE"
+        exit $EXIT_CODE
+      fi
     fi
   fi
+else
+  # Default: start worker background and run built-in server in foreground
+  start_worker_bg
+  echo "Starting API server (foreground)..."
+  API_PID=0
+  trap 'echo "Received signal, shutting down..."; if kill -0 "$WORKER_PID" 2>/dev/null; then kill -TERM "$WORKER_PID" 2>/dev/null || true; fi; wait "$WORKER_PID" 2>/dev/null || true; exit 0' INT TERM
+  # run server in foreground (no ampersand) so this script remains the parent and can clean up the worker
+  /usr/local/bin/node ./src/server.js
+  EXIT_CODE=$?
+  echo "API server exited with code $EXIT_CODE"
+  if kill -0 "$WORKER_PID" 2>/dev/null; then
+    kill -TERM "$WORKER_PID" 2>/dev/null || true
+  fi
+  wait "$WORKER_PID" 2>/dev/null || true
+  exit $EXIT_CODE
 fi
-
-echo "Starting API server..."
-node ./src/server.js &
-API_PID=$!
-
-echo "Starting duplicate-scan worker..."
-node ./src/worker/dupWorker.js &
-WORKER_PID=$!
 
 # Forward SIGINT/SIGTERM to children and wait for graceful shutdown
 term_handler() {
@@ -104,14 +155,5 @@ term_handler() {
   exit 0
 }
 
-trap 'term_handler' INT TERM
-
-# If either process exits, terminate the other and exit with its status
-( wait "$API_PID"; RC=$?; echo "API process exited with $RC"; kill -TERM "$WORKER_PID" 2>/dev/null || true; exit $RC ) &
-WATCHER_API=$!
-( wait "$WORKER_PID"; RC=$?; echo "Worker process exited with $RC"; kill -TERM "$API_PID" 2>/dev/null || true; exit $RC ) &
-WATCHER_WORKER=$!
-
-# Wait for any child to exit (the subshells above handle cleanup/exit)
-wait
+# script will not reach here because branches exit after running server/main; keep file end clean
 
