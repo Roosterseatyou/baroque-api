@@ -3,12 +3,15 @@ import db from '../config/knex.js';
 export function requireOrgRole(requiredRole = null) {
     return async function(req, res, next) {
         const userId = req.user && req.user.id;
+        // normalize params/body to avoid reading properties of undefined
+        const params = req.params || {};
+        const body = req.body || {};
         // accept multiple param names for flexibility
-        let orgId = req.params.organizationId || req.params.orgId || req.params.id || req.body.organizationId;
+        let orgId = params.organizationId || params.orgId || params.id || body.organizationId;
         // If orgId wasn't provided, try to derive it from pieceId or libraryId
         try {
             if (!orgId) {
-                const pieceId = req.params.pieceId || req.body.pieceId;
+                const pieceId = params.pieceId || body.pieceId;
                 if (pieceId) {
                     const piece = await db('pieces').where({ id: pieceId }).first();
                     if (piece && piece.library_id) {
@@ -18,7 +21,7 @@ export function requireOrgRole(requiredRole = null) {
                 }
             }
             if (!orgId) {
-                const libraryId = req.params.libraryId || req.body.libraryId;
+                const libraryId = params.libraryId || body.libraryId;
                 if (libraryId) {
                     const lib = await db('libraries').where({ id: libraryId }).first();
                     if (lib && lib.organization_id) orgId = lib.organization_id;
@@ -75,11 +78,13 @@ export function requireOrgRole(requiredRole = null) {
 export function requireLibraryRole(requiredRole = null) {
     return async function(req, res, next) {
         const userId = req.user && req.user.id;
-        let libraryId = req.params.libraryId || req.params.id || req.body.libraryId;
+        const params = req.params || {};
+        const body = req.body || {};
+        let libraryId = params.libraryId || params.id || body.libraryId;
         // If libraryId not provided, try to derive it from pieceId
         try {
             if (!libraryId) {
-                const pieceId = req.params.pieceId || req.body.pieceId;
+                const pieceId = params.pieceId || body.pieceId;
                 if (pieceId) {
                     const piece = await db('pieces').where({ id: pieceId }).first();
                     if (piece && piece.library_id) libraryId = piece.library_id;
@@ -134,11 +139,13 @@ export function requireOrgOrLibraryRole(requiredRole = null) {
         if (!userId) return res.status(401).json({ message: 'Unauthorized' });
 
         // derive ids
-        let libraryId = req.params.libraryId || req.params.id || req.body.libraryId;
-        let orgId = req.params.organizationId || req.params.orgId || req.params.id || req.body.organizationId;
+        const params = req.params || {};
+        const body = req.body || {};
+        let libraryId = params.libraryId || params.id || body.libraryId;
+        let orgId = params.organizationId || params.orgId || params.id || body.organizationId;
         try {
             if (!libraryId) {
-                const pieceId = req.params.pieceId || req.body.pieceId;
+                const pieceId = params.pieceId || body.pieceId;
                 if (pieceId) {
                     const piece = await db('pieces').where({ id: pieceId }).first();
                     if (piece && piece.library_id) libraryId = piece.library_id;

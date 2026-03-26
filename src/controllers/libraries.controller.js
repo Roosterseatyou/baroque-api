@@ -66,6 +66,41 @@ export async function getLibraries(req, res) {
     }
 }
 
+// Generate a view-only token for a library (authenticated; requires library role of owner/admin)
+export async function generateViewToken(req, res) {
+    try {
+        const libraryId = req.params.libraryId;
+        const token = await libraryService.generateViewToken(libraryId);
+        res.status(200).json({ view_token: token });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+}
+
+export async function revokeViewToken(req, res) {
+    try {
+        const libraryId = req.params.libraryId;
+        await libraryService.revokeViewToken(libraryId);
+        res.status(204).send();
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+}
+
+// Public endpoint: GET /libraries/public/:token
+export async function getLibraryByToken(req, res) {
+    try {
+        const token = req.params.token;
+        const library = await libraryService.getLibraryByToken(token);
+        if (!library) return res.status(404).json({ error: 'Library not found' });
+        // include pieces and tags in read-only form
+        const pieces = await piecesService.getPieces(library.id);
+        res.status(200).json({ ...library, pieces });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+}
+
 export async function importFromSpreadsheet(req, res) {
     try {
         const libraryId = req.params.libraryId;
