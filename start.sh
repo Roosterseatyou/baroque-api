@@ -59,6 +59,17 @@ start_worker_bg() {
 }
 
 if [ -n "${MAIN_FILE:-}" ]; then
+  # If MAIN_FILE is set but START_BOTH is not explicitly provided, and
+  # MAIN_FILE points to the bundled server (e.g. src/server.js), default
+  # to starting both the server and the worker. This helps Pterodactyl
+  # setups that set MAIN_FILE=src/server.js by default.
+  # Treat empty or unset START_BOTH as not provided; default to starting both when MAIN_FILE looks like the API server
+  if [ -z "${START_BOTH:-}" ]; then
+    if echo "$MAIN_FILE" | grep -E '(^|/)(src/)?server\.js$' >/dev/null 2>&1; then
+      echo "Detected MAIN_FILE=${MAIN_FILE} looks like the API server — defaulting START_BOTH=1"
+      START_BOTH=1
+    fi
+  fi
   # MAIN_FILE set
   if [ "${START_BOTH:-0}" = "1" ]; then
     # start worker, then run main file as foreground server
