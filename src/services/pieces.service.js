@@ -146,3 +146,53 @@ export async function findPieceByTitleAndComposer(libraryId, title, composer) {
     const piece = await q.first();
     return piece || null;
 }
+
+// Search pieces across other libraries in the same organization (used for autofill suggestions)
+export async function searchPiecesInOrgLibraries({ libraryId, orgId, query, maxResults = 10, includeExternal = false }) {
+    // If includeExternal is false we require orgId; otherwise includeExternal will search across orgs
+    if (!includeExternal && !orgId) return [];
+
+    // determine candidate libraries
+    let libs = [];
+    if (includeExternal) {
+        // include libraries only from organizations that have explicitly opted in (allow_sharing = true)
+        const allowedOrgs = await db('organizations').where({ allow_sharing: true }).select('id');
+        const allowedOrgIds = allowedOrgs.map(o => o.id);
+        if (allowedOrgIds.length === 0) return [];
+        libs = await db('libraries').whereIn('organization_id', allowedOrgIds).select('id');
+    } else {
+        // get other libraries in the org
+        libs = await db('libraries').where({ organization_id: orgId }).select('id');
+    }
+    const libIds = libs.map(l => l.id).filter(id => id !== libraryId);
+    if (libIds.length === 0) return [];
+
+    const q = (query || '').trim();
+    // query pieces from the candidate libraries (do not join libraries or select library names)
+    const piecesQuery = db('pieces')
+        .whereIn('library_id', libIds)
+        .select('pieces.*');
+    if (q) {
+        const like = `%${q}%`;
+        piecesQuery.andWhere(function() {
+            this.where('title', 'like', like).orWhere('composer', 'like', like).orWhere('library_number', 'like', like);
+        });
+    }
+    piecesQuery.limit(maxResults);
+
+    const pieces = await piecesQuery;
+    if (!pieces || pieces.length === 0) return [];
+
+    const pieceIds = pieces.map(p => p.id);
+    const tagRows = await db('piece_tags')
+        .join('tags', 'piece_tags.tag_id', 'tags.id')
+        .whereIn('piece_tags.piece_id', pieceIds)
+        .select('piece_tags.piece_id as piece_id', 'tags.id as id', 'tags.name as name');
+    const tagsByPiece = {};
+    for (const row of tagRows) {
+        tagsByPiece[row.piece_id] = tagsByPiece[row.piece_id] || [];
+        tagsByPiece[row.piece_id].push({ id: row.id, name: row.name });
+    }
+    return pieces.map(p => ({ ...p, tags: tagsByPiece[p.id] || [] }));
+}
+

@@ -120,10 +120,56 @@ export async function searchPieces(req, res) {
         const byTitle = req.query.byTitle === 'true' || req.query.byTitle === '1' || req.query.byTitle === 'on' || req.query.byTitle === true;
         const byComposer = req.query.byComposer === 'true' || req.query.byComposer === '1' || req.query.byComposer === 'on' || req.query.byComposer === true;
         const byLibNumber = req.query.byLibNumber === 'true' || req.query.byLibNumber === '1' || req.query.byLibNumber === 'on' || req.query.byLibNumber === true;
-
-        const pieces = await piecesService.searchPieces(req.params.libraryId, query, { byTitle, byComposer, byLibNumber });
+        const includeExternal = req.query.includeExternal === 'true' || req.query.includeExternal === '1' || req.query.includeExternal === 'on' || req.query.includeExternal === true;
+        // If includeExternal is true, expand search to libraries outside the org (respecting org opt-out)
+        let pieces;
+        if (includeExternal) {
+            // get the library to obtain its organization id
+            const lib = await librariesService.getLibraryById(req.params.libraryId);
+            const orgId = lib ? lib.organization_id : null;
+            pieces = await piecesService.searchPiecesInOrgLibraries({ libraryId: req.params.libraryId, orgId, query, maxResults: 200, includeExternal: true });
+        } else {
+            pieces = await piecesService.searchPieces(req.params.libraryId, query, { byTitle, byComposer, byLibNumber });
+        }
         res.status(200).json(pieces);
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
 }
+
+// Autocomplete / autofill: search other libraries in the same organization for matching pieces
+export async function autofillFromOrgLibraries(req, res) {
+    try {
+        const { libraryId } = req.params;
+        const { query } = req.query;
+        if (!libraryId) return res.status(400).json({ error: 'libraryId required' });
+
+        // ensure library exists and get its org
+        const lib = await librariesService.getLibraryById(libraryId);
+        if (!lib) return res.status(404).json({ error: 'library not found' });
+
+        const orgId = lib.organization_id;
+        if (!orgId) return res.status(400).json({ error: 'library not associated with an organization' });
+
+        // parse includeExternal flag from query string (true/1/on)
+        const includeExternal = req.query.includeExternal === 'true' || req.query.includeExternal === '1' || req.query.includeExternal === 'on' || req.query.includeExternal === true;
+
+        const results = await piecesService.searchPiecesInOrgLibraries({ libraryId, orgId, query, maxResults: 20, includeExternal });
+        // Only return lightweight fields for autofill
+        const payload = results.map(r => ({
+            id: r.id,
+            library_id: r.library_id,
+            title: r.title,
+            composer: r.composer,
+            arranger: r.arranger,
+            publisher: r.publisher,
+            library_number: r.library_number,
+            tags: r.tags || []
+        }));
+        res.status(200).json(payload);
+    } catch (error) {
+        console.error('autofillFromOrgLibraries error', error);
+        res.status(500).json({ error: error.message });
+    }
+}
+

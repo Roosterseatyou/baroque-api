@@ -88,9 +88,18 @@ export async function removeMember(req, res) {
 
 export async function updateOrganization(req, res) {
     try {
-        const { name } = req.body;
+        const { name, allow_sharing } = req.body;
+        // only allow updating allow_sharing if caller has permission (membership check is above in route)
         const updatedOrganization = await orgsService.updateOrganization(req.params.organizationId, { name });
-        res.status(200).json(updatedOrganization);
+        // update settings separately so we don't mix signature with existing function
+        if (typeof allow_sharing !== 'undefined') {
+            // require an elevated membership
+            const membership = await orgsService.getMembershipForUser(req.params.organizationId, req.user && req.user.id);
+            if (!membership || !['owner','admin'].includes(membership.role)) return res.status(403).json({ error: 'Forbidden' });
+            await orgsService.updateOrganizationSettings(req.params.organizationId, { allow_sharing: !!allow_sharing });
+        }
+        const latest = await orgsService.getOrganizationById(req.params.organizationId);
+        res.status(200).json(latest);
     } catch (error) {
         res.status(400).json({ error: error.message });
     }

@@ -19,6 +19,8 @@ router.delete('/id/:pieceId', authenticate, requireOrgRole(), piecesController.d
 
 // additional helpers
 router.get('/search/:libraryId', authenticate, piecesController.searchPieces);
+// autofill suggestions from other libraries in the same organization
+router.get('/autofill/:libraryId', authenticate, piecesController.autofillFromOrgLibraries);
 router.get('/library/:libraryId', authenticate, piecesController.getPieces);
 
 // piece tags

@@ -91,6 +91,15 @@ export async function updateOrganization(organizationId, { name }) {
     return updatedOrganization;
 }
 
+export async function updateOrganizationSettings(organizationId, { allow_sharing }) {
+    const update = {};
+    if (typeof allow_sharing !== 'undefined') update.allow_sharing = allow_sharing;
+    if (Object.keys(update).length === 0) return await getOrganizationById(organizationId);
+    update.updated_at = db.fn.now();
+    await db('organizations').where({ id: organizationId }).update(update);
+    return await getOrganizationById(organizationId);
+}
+
 export async function deleteOrganization(organizationId, performedBy = null) {
     // Soft-delete organization by setting deleted_at so it can be restored later
     // fetch existing org name for audit details
