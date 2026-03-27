@@ -12,6 +12,8 @@ const MAX_LEN = {
   library_number: 64
 }
 
+const MAX_QUANTITY = 1000000
+
 function validatePiecePayload(data) {
   const errors = [];
   if (!data || typeof data !== 'object') {
@@ -29,13 +31,17 @@ function validatePiecePayload(data) {
   if (data.publisher && data.publisher.length > MAX_LEN.publisher) errors.push(`publisher must be <= ${MAX_LEN.publisher} characters`)
   if (data.library_number && data.library_number.length > MAX_LEN.library_number) errors.push(`library_number must be <= ${MAX_LEN.library_number} characters`)
   if (data.difficulty && !ALLOWED_DIFFICULTIES.includes(data.difficulty)) errors.push('difficulty value is invalid')
+  if (data.quantity !== undefined) {
+    const q = Number(data.quantity)
+    if (!Number.isFinite(q) || q < 0 || q > MAX_QUANTITY) errors.push('quantity value is invalid')
+  }
   return errors
 }
 
 export async function createPiece(req, res) {
     try {
 
-        const data = req.body; // include title, composer, difficulty, etc.
+        const data = req.body; // include title, composer, difficulty, quantity, etc.
         const errors = validatePiecePayload(data)
         if (errors.length) return res.status(400).json({ errors })
 
@@ -94,8 +100,8 @@ export async function getPieces(req, res) {
 
 export async function updatePiece(req, res) {
     try {
-        const { title, composer, arranger, instrumentation, difficulty, publisher, metadata, library_number } = req.body;
-        const data = { title, composer, arranger, instrumentation, difficulty, publisher, metadata, library_number }
+        const { title, composer, arranger, instrumentation, difficulty, publisher, metadata, library_number, quantity } = req.body;
+        const data = { title, composer, arranger, instrumentation, difficulty, publisher, metadata, library_number, quantity }
         const errors = validatePiecePayload(data)
         if (errors.length) return res.status(400).json({ errors })
         const updatedPiece = await piecesService.updatePiece(req.params.pieceId, data);
@@ -164,7 +170,8 @@ export async function autofillFromOrgLibraries(req, res) {
             arranger: r.arranger,
             publisher: r.publisher,
             library_number: r.library_number,
-            tags: r.tags || []
+            tags: r.tags || [],
+            quantity: r.quantity != null ? Number(r.quantity) : 1
         }));
         res.status(200).json(payload);
     } catch (error) {
