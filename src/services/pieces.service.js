@@ -20,12 +20,13 @@ export async function createPiece({ libraryId, data }) {
         composer: data.composer,
         arranger: data.arranger || null,
         publisher: publisherValue,
+        quantity: Number.isFinite(Number(data.quantity)) ? Number(data.quantity) : 1,
         library_number: data.library_number || null,
         difficulty: data.difficulty || null,
         instrumentation: data.instrumentation || null,
         metadata: JSON.stringify(data.metadata || {})
     });
-    return { id: pieceId, library_id: libraryId, library_number: data.library_number || null, ...data };
+    return { id: pieceId, library_id: libraryId, library_number: data.library_number || null, quantity: Number.isFinite(Number(data.quantity)) ? Number(data.quantity) : 1, ...data };
 }
 
 export async function getPieceById(pieceId) {
@@ -35,6 +36,8 @@ export async function getPieceById(pieceId) {
         .join('tags', 'piece_tags.tag_id', 'tags.id')
         .where('piece_tags.piece_id', pieceId)
         .select('tags.id','tags.name');
+    // normalize quantity to number for API consumers
+    piece.quantity = piece.quantity != null ? Number(piece.quantity) : 1;
     return piece;
 }
 
@@ -52,7 +55,7 @@ export async function getPieces(libraryId) {
         tagsByPiece[row.piece_id] = tagsByPiece[row.piece_id] || [];
         tagsByPiece[row.piece_id].push({ id: row.id, name: row.name });
     }
-    return pieces.map(p => ({ ...p, tags: tagsByPiece[p.id] || [] }));
+    return pieces.map(p => ({ ...p, tags: tagsByPiece[p.id] || [], quantity: p.quantity != null ? Number(p.quantity) : 1 }));
 }
 
 export async function updatePiece(pieceId, data) {
@@ -71,6 +74,7 @@ export async function updatePiece(pieceId, data) {
             composer: data.composer,
             arranger: data.arranger || null,
             publisher: publisherValue,
+            quantity: Number.isFinite(Number(data.quantity)) ? Number(data.quantity) : 1,
             library_number: data.library_number || null,
             difficulty: data.difficulty || null,
             instrumentation: data.instrumentation || null,
@@ -108,7 +112,7 @@ export async function searchPieces(libraryId, query, opts = {}) {
             tagsByPiece[row.piece_id] = tagsByPiece[row.piece_id] || [];
             tagsByPiece[row.piece_id].push({ id: row.id, name: row.name });
         }
-        return allPieces.map(p => ({ ...p, tags: tagsByPiece[p.id] || [] }));
+        return allPieces.map(p => ({ ...p, tags: tagsByPiece[p.id] || [], quantity: p.quantity != null ? Number(p.quantity) : 1 }));
     }
 
     const like = `%${q}%`;
@@ -136,7 +140,7 @@ export async function searchPieces(libraryId, query, opts = {}) {
         tagsByPiece[row.piece_id] = tagsByPiece[row.piece_id] || [];
         tagsByPiece[row.piece_id].push({ id: row.id, name: row.name });
     }
-    return pieces.map(p => ({ ...p, tags: tagsByPiece[p.id] || [] }));
+    return pieces.map(p => ({ ...p, tags: tagsByPiece[p.id] || [], quantity: p.quantity != null ? Number(p.quantity) : 1 }));
 }
 
 export async function findPieceByTitleAndComposer(libraryId, title, composer) {
@@ -194,7 +198,7 @@ export async function searchPiecesInOrgLibraries({ libraryId, orgId, query, maxR
         tagsByPiece[row.piece_id] = tagsByPiece[row.piece_id] || [];
         tagsByPiece[row.piece_id].push({ id: row.id, name: row.name });
     }
-    return pieces.map(p => ({ ...p, tags: tagsByPiece[p.id] || [] }));
+    return pieces.map(p => ({ ...p, tags: tagsByPiece[p.id] || [], quantity: p.quantity != null ? Number(p.quantity) : 1 }));
 }
 
 // Find potential duplicate pieces in a library.
