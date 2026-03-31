@@ -9,6 +9,7 @@ import librariesRoutes from "./routes/libraries.routes.js";
 import piecesRoutes from "./routes/pieces.routes.js";
 import scrapeRoutes from "./routes/scrape.routes.js";
 import googleRoutes from "./routes/google.routes.js";
+import invitationsRoutes from "./routes/invitations.routes.js";
 import db from './config/knex.js';
 
 const app = express();
@@ -49,6 +50,7 @@ app.use('/organizations', orgsRoutes);
 app.use('/libraries', librariesRoutes);
 app.use('/pieces', piecesRoutes);
 app.use('/scrape', scrapeRoutes);
+app.use('/invitations', invitationsRoutes);
 // Mount integrations routes only when explicitly enabled. The frontend login/signup
 // flow uses the auth routes (`/auth/google`), so by default we keep integrations
 // disabled to avoid confusion now that Drive/Sheets integrations were removed.

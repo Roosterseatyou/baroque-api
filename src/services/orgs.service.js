@@ -63,7 +63,7 @@ export async function getOrganizationMembers(organizationId) {
     const members = await db('organization_memberships')
         .join('users', 'organization_memberships.user_id', 'users.id')
         .where('organization_memberships.organization_id', organizationId)
-        .select('users.id', 'users.name', 'users.email', 'organization_memberships.role as membership_role');
+        .select('users.id', 'users.name', 'users.username', 'users.discriminator', 'organization_memberships.role as membership_role');
     return members;
 }
 
@@ -80,6 +80,16 @@ export async function removeMemberFromOrganization({ organizationId, userId }) {
     await db('organization_memberships')
         .where({ organization_id: organizationId, user_id: userId })
         .del();
+}
+
+export async function updateMemberRole({ organizationId, userId, role }) {
+    // validate role
+    const allowed = ['viewer','editor','admin','owner','manager'];
+    if (!allowed.includes(role)) throw new Error('Invalid role');
+    await db('organization_memberships').where({ organization_id: organizationId, user_id: userId }).update({ role, updated_at: db.fn.now() });
+    const row = await db('organization_memberships').where({ organization_id: organizationId, user_id: userId }).first();
+    if (!row) throw new Error('Membership not found');
+    return { id: row.id, organization_id: row.organization_id, user_id: row.user_id, role: row.role };
 }
 
 export async function updateOrganization(organizationId, { name }) {

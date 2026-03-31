@@ -47,9 +47,10 @@ function buildRefreshCookieOptions(frontendOrigin) {
 
 export async function register(req, res) {
     try {
-        const { email, name, password } = req.body;
-        const user = await authService.registerUser({ email, name, password });
-        res.status(201).json(user);
+        const { username, name, password } = req.body;
+        const user = await authService.registerUser({ username, name, password });
+        // return minimal user (no email)
+        res.status(201).json({ id: user.id, username: user.username, name: user.name });
     } catch (error) {
         res.status(400).json({ error: error.message });
     }
@@ -57,9 +58,9 @@ export async function register(req, res) {
 
 export async function login(req, res) {
     try {
-        const { email, password } = req.body;
+        const { usernameWithDisc, password } = req.body;
         const metadata = { ip: req.ip, userAgent: req.get('user-agent') };
-        const { token, refreshToken, refresh_expires_at, user } = await authService.loginUser({ email, password }, metadata);
+        const { token, refreshToken, refresh_expires_at, user } = await authService.loginUser({ usernameWithDisc, password }, metadata);
         // set refresh token as httpOnly cookie
         const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || 'http://localhost:5173';
         const cookieOpts = buildRefreshCookieOptions(FRONTEND_ORIGIN);
@@ -68,7 +69,8 @@ export async function login(req, res) {
         }
         res.cookie(REFRESH_COOKIE_NAME, refreshToken, cookieOpts);
         // Include a 'restored' flag if the login process restored a soft-deleted user
-        const resp = { token, refresh_expires_at, user };
+        const respUser = { id: user.id, username: user.username, discriminator: user.discriminator, name: user.name, avatar_url: user.avatar_url };
+        const resp = { token, refresh_expires_at, user: respUser };
         if (typeof user?.restored !== 'undefined') resp.restored = user.restored === true;
         res.status(200).json(resp);
     } catch (error) {
@@ -91,7 +93,7 @@ export async function refresh(req, res) {
         }
         res.cookie(REFRESH_COOKIE_NAME, result.refreshToken, cookieOpts);
         // Include a 'restored' flag when refresh restored a soft-deleted user
-        const respUser = { id: result.user.id, email: result.user.email, name: result.user.name, avatar_url: result.user.avatar_url };
+        const respUser = { id: result.user.id, username: result.user.username, discriminator: result.user.discriminator, name: result.user.name, avatar_url: result.user.avatar_url };
         const resp = { token: result.accessToken, user: respUser };
         if (result.restored === true || result.user?.restored === true) resp.restored = true;
         res.status(200).json(resp);

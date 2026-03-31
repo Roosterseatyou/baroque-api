@@ -6,8 +6,9 @@ import {generateAccessToken} from '../utils/jwt.js';
 import crypto from 'crypto';
 import debug from '../utils/debug.js';
 
-export async function registerUser({ email, name, password }) {
-    const existingUser = await db('users').where({ email }).first();
+export async function registerUser({ username, name, password }) {
+    const canonical = String(username || '').toLowerCase();
+    const existingUser = await db('users').whereRaw('LOWER(username) = LOWER(?)', [canonical]).first();
     if (existingUser) {
         throw new Error('User already exists');
     }
@@ -17,12 +18,13 @@ export async function registerUser({ email, name, password }) {
 
     await db('users').insert({
         id,
-        email,
+        username: canonical,
+        discriminator: '0000', // caller can override if desired
         name,
         password: hashedPassword,
     });
 
-    return { id, email, name };
+    return { id, username: canonical, name };
 }
 
 function generateRandomString(bytes = 24) {
@@ -68,15 +70,26 @@ export async function revokeAllRefreshTokensForUser(userId, reason = 'compromise
     await db('refresh_tokens').where({ user_id: userId }).update({ revoked: true, revoked_at: new Date(), revoked_reason: reason });
 }
 
-export async function loginUser({ email, password }, metadata = {}) {
-    const user = await db('users').where({ email }).first();
+export async function loginUser({ usernameWithDisc, password }, metadata = {}) {
+    // expecting usernameWithDisc like 'alice#1234' or username alone
+    let username = usernameWithDisc || '';
+    let discriminator = null;
+    if (username.includes('#')) {
+        const parts = username.split('#');
+        username = parts[0];
+        discriminator = parts[1];
+    }
+    const canonical = String(username).toLowerCase();
+    const query = db('users').where({ username: canonical });
+    if (discriminator) query.andWhere({ discriminator });
+    const user = await query.first();
     if (!user) {
-        throw new Error('Invalid email or password');
+        throw new Error('Invalid username or password');
     }
 
     const isPasswordValid = await comparePassword(password, user.password);
     if (!isPasswordValid) {
-        throw new Error('Invalid email or password');
+        throw new Error('Invalid username or password');
     }
 
     // If user was soft-deleted, restore them and mark as restored so caller can notify
@@ -94,12 +107,12 @@ export async function loginUser({ email, password }, metadata = {}) {
         }
     }
 
-    const payload = { id: effectiveUser.id, email: effectiveUser.email };
+    const payload = { id: effectiveUser.id, username: effectiveUser.username, discriminator: effectiveUser.discriminator };
     const accessToken = generateAccessToken(payload);
 
     const refreshToken = await createRefreshTokenForUser(user.id, 30, metadata);
 
-    const safeUser = { id: effectiveUser.id, email: effectiveUser.email, name: effectiveUser.name, avatar_url: effectiveUser.avatar_url };
+    const safeUser = { id: effectiveUser.id, username: effectiveUser.username, discriminator: effectiveUser.discriminator, name: effectiveUser.name, avatar_url: effectiveUser.avatar_url };
     if (restored) safeUser.restored = true;
 
     return { token: accessToken, refreshToken: refreshToken.token, refresh_expires_at: refreshToken.expires_at, user: safeUser, restored };
@@ -140,7 +153,7 @@ export async function exchangeRefreshToken(cookieValue, rotate = true, metadata 
     const user = await db('users').where({ id: row.user_id }).first();
     if (!user) return null;
 
-    const accessToken = generateAccessToken({ id: user.id, email: user.email });
+    const accessToken = generateAccessToken({ id: user.id, username: user.username, discriminator: user.discriminator });
 
     // auto-restore soft-deleted users on refresh
     let restored = false;
@@ -160,12 +173,12 @@ export async function exchangeRefreshToken(cookieValue, rotate = true, metadata 
         // mark old token as revoked and delete it (we set revoked flag and then delete the row to avoid reuse)
         await db('refresh_tokens').where({ selector: parsed.selector }).update({ revoked: true, revoked_at: new Date(), revoked_reason: 'rotated' });
         await db('refresh_tokens').where({ selector: parsed.selector }).del();
-            const safeUser = { id: effectiveUser.id, email: effectiveUser.email, name: effectiveUser.name, avatar_url: effectiveUser.avatar_url };
+            const safeUser = { id: effectiveUser.id, username: effectiveUser.username, discriminator: effectiveUser.discriminator, name: effectiveUser.name, avatar_url: effectiveUser.avatar_url };
             if (restored) safeUser.restored = true;
             return { accessToken, user: safeUser, refreshToken: newRefresh.token, refresh_expires_at: newRefresh.expires_at, restored };
     }
 
-    const safeUser = { id: effectiveUser.id, email: effectiveUser.email, name: effectiveUser.name, avatar_url: effectiveUser.avatar_url };
+    const safeUser = { id: effectiveUser.id, username: effectiveUser.username, discriminator: effectiveUser.discriminator, name: effectiveUser.name, avatar_url: effectiveUser.avatar_url };
     if (restored) safeUser.restored = true;
     return { accessToken, user: safeUser, restored };
 }
@@ -186,12 +199,21 @@ export async function createOrFindUserByGoogle(profile) {
     if (existingOAuth) {
         return db('users').where({id: existingOAuth.user_id}).first();
     }
-    let user = await db('users').where({ email }).first();
+
+    // Try to find by oauth_info.email mapping if present; otherwise create a user with generated username
+    let user = null;
+    if (email) {
+      user = await db('users').where({}).whereRaw('LOWER(username) = LOWER(?)', [email.split('@')[0]]).first();
+    }
     if (!user) {
         const userId = generateUUID();
+        // Generate a sanitized username base
+        const base = (name || 'user').toLowerCase().replace(/[^a-z0-9._-]/g, '').slice(0,28) || 'user';
+        const disc = Math.floor(Math.random() * 10000).toString().padStart(4,'0');
         await db('users').insert({
             id: userId,
-            email,
+            username: base,
+            discriminator: disc,
             name,
             avatar_url: avatarUrl,
         });
@@ -200,7 +222,7 @@ export async function createOrFindUserByGoogle(profile) {
     await db('oauth_info').insert({
         id: generateUUID(),
         user_id: user.id,
-        email,
+        email: email || null,
         provider: 'google',
         provider_user_id: googleId,
         avatar_url: avatarUrl,

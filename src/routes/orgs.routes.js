@@ -11,6 +11,7 @@ router.put('/:organizationId', authenticate, requireOrgRole(), orgsController.up
 router.delete('/:organizationId', authenticate, requireOrgRole(), orgsController.deleteOrganization);
 router.post('/:organizationId/invite', authenticate, requireOrgRole(), orgsController.addMember);
 router.post('/:organizationId/remove', authenticate, requireOrgRole(), orgsController.removeMember);
+router.post('/:organizationId/members/:userId/role', authenticate, requireOrgRole(), orgsController.updateMemberRole);
 router.get('/:organizationId/members', authenticate, requireOrgRole(), orgsController.getMembers);
 // Restore soft-deleted organization
 router.post('/:organizationId/restore', authenticate, orgsController.restoreOrganization);

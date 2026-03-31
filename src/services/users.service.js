@@ -21,10 +21,19 @@ export async function getUserOrganizations(userId) {
     return organizations;
 }
 
-export async function updateUserProfile(userId, { name, email }) {
+export async function updateUserProfile(userId, { name, username, discriminator }) {
+    const update = {};
+    if (typeof name !== 'undefined') update.name = name;
+    if (typeof username !== 'undefined') update.username = String(username).toLowerCase();
+    if (typeof discriminator !== 'undefined') update.discriminator = discriminator;
+
+    if (Object.keys(update).length === 0) {
+        return await getUserById(userId);
+    }
+
     await db('users')
         .where({ id: userId })
-        .update({ name, email });
+        .update(update);
 
     const updatedUser = await getUserById(userId);
     return updatedUser;
@@ -163,10 +172,29 @@ export async function getUserLibraries(userId) {
     return libraries;
 }
 
-// find a user by email (used by invitation flow)
-export async function getUserByEmail(email) {
-    if (!email) return null;
-    const user = await db('users').where({ email }).first();
+// find a user by username#discriminator or username
+export async function getUserByHandle(handle) {
+    if (!handle) return null;
+    // accept either 'username#1234' or { username, discriminator }
+    if (typeof handle === 'string') {
+        let username = handle;
+        let discriminator = null;
+        if (handle.includes('#')) {
+            const parts = handle.split('#');
+            username = parts[0];
+            discriminator = parts[1];
+        }
+        const query = db('users').whereRaw('LOWER(username) = LOWER(?)', [username]);
+        if (discriminator) query.andWhere({ discriminator });
+        const user = await query.first();
+        return user || null;
+    }
+    // if passed an object
+    const { username, discriminator } = handle || {};
+    if (!username) return null;
+    const query = db('users').whereRaw('LOWER(username) = LOWER(?)', [username]);
+    if (discriminator) query.andWhere({ discriminator });
+    const user = await query.first();
     return user || null;
 }
 
