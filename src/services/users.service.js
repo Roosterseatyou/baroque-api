@@ -21,11 +21,49 @@ export async function getUserOrganizations(userId) {
     return organizations;
 }
 
+// Helper: generate a unique 4-digit numeric discriminator for a username
+async function generateUniqueDiscriminator(username) {
+    const canonical = String(username || '').toLowerCase();
+    // Try some random attempts first
+    for (let attempt = 0; attempt < 50; attempt++) {
+        const disc = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
+        const existing = await db('users').whereRaw('LOWER(username) = LOWER(?)', [canonical]).andWhere({ discriminator: disc }).first();
+        if (!existing) return disc;
+    }
+    // Fallback to linear search
+    for (let i = 0; i < 10000; i++) {
+        const disc = String(i).padStart(4, '0');
+        const existing = await db('users').whereRaw('LOWER(username) = LOWER(?)', [canonical]).andWhere({ discriminator: disc }).first();
+        if (!existing) return disc;
+    }
+    throw new Error('Unable to generate unique discriminator');
+}
+
 export async function updateUserProfile(userId, { name, username, discriminator }) {
     const update = {};
+
+    // Load current user to decide whether discriminator assignment is needed
+    const currentUser = await db('users').where({ id: userId }).first();
+    if (!currentUser) throw new Error('User not found');
+
     if (typeof name !== 'undefined') update.name = name;
     if (typeof username !== 'undefined') update.username = String(username).toLowerCase();
-    if (typeof discriminator !== 'undefined') update.discriminator = discriminator;
+
+    // Ignore client-provided discriminator. Server will assign one when appropriate.
+    // If username changed or the user currently has no discriminator, generate one server-side.
+    if (typeof username !== 'undefined') {
+        const newUsernameCanonical = String(username || '').toLowerCase();
+        const currentUsernameCanonical = String(currentUser.username || '').toLowerCase();
+        if (newUsernameCanonical !== currentUsernameCanonical || !currentUser.discriminator) {
+            const disc = await generateUniqueDiscriminator(newUsernameCanonical);
+            update.discriminator = disc;
+        }
+    } else if (!currentUser.discriminator) {
+        // username unchanged but discriminator missing - generate one for existing username
+        const disc = await generateUniqueDiscriminator(currentUser.username || currentUser.email?.split('@')[0] || 'user');
+        update.discriminator = disc;
+    }
+
     if (typeof arguments[1] !== 'undefined' && arguments[1] && typeof arguments[1].email !== 'undefined') {
         const email = arguments[1].email;
         if (email) {

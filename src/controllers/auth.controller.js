@@ -10,8 +10,10 @@ const IS_PROD = process.env.NODE_ENV === 'production'
 // cross-site OAuth redirect from Google. Browsers require Secure when SameSite=None.
 const REFRESH_COOKIE_OPTIONS = {
     httpOnly: true,
+    // secure in production only; in local dev we keep secure=false so localhost HTTP works
     secure: IS_PROD,
-    sameSite: IS_PROD ? 'none' : 'lax',
+    // Require SameSite=None so the refresh cookie will be included on cross-site POSTs (SPA XHR)
+    sameSite: 'none',
     // use root path so the browser includes the cookie for /auth/refresh
     path: '/',
     // maxAge not set here; the token has its own expiry in DB
@@ -33,12 +35,13 @@ const OAUTH_STATE_OPTIONS = {
 function buildRefreshCookieOptions(frontendOrigin) {
     const isLocal = frontendOrigin && (frontendOrigin.includes('localhost') || frontendOrigin.includes('127.0.0.1')) || process.env.NODE_ENV !== 'production';
     const opts = Object.assign({}, REFRESH_COOKIE_OPTIONS);
+    // For local development use SameSite='lax' and secure=false so browsers accept Set-Cookie
+    // from localhost:3000 when the frontend is at localhost:5173.
     if (isLocal) {
-        // local development - allow non-secure and SameSite=lax so browsers will accept the cookie
         opts.sameSite = 'lax';
         opts.secure = false;
     } else {
-        // production - require cross-site cookie support
+        // In production require cross-site cookie support
         opts.sameSite = 'none';
         opts.secure = true;
     }
@@ -58,9 +61,9 @@ export async function register(req, res) {
 
 export async function login(req, res) {
     try {
-        const { usernameWithDisc, password } = req.body;
+        const { email, password } = req.body;
         const metadata = { ip: req.ip, userAgent: req.get('user-agent') };
-        const { token, refreshToken, refresh_expires_at, user } = await authService.loginUser({ usernameWithDisc, password }, metadata);
+        const { token, refreshToken, refresh_expires_at, user } = await authService.loginUser({ email, password }, metadata);
         // set refresh token as httpOnly cookie
         const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || 'http://localhost:5173';
         const cookieOpts = buildRefreshCookieOptions(FRONTEND_ORIGIN);

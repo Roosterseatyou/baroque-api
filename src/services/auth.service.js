@@ -6,6 +6,22 @@ import {generateAccessToken} from '../utils/jwt.js';
 import crypto from 'crypto';
 import debug from '../utils/debug.js';
 
+// Helper to generate unique discriminator for a username (mirror logic from users.service)
+async function generateUniqueDiscriminatorForUsername(username) {
+    const canonical = String(username || '').toLowerCase();
+    for (let attempt = 0; attempt < 50; attempt++) {
+        const disc = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
+        const existing = await db('users').whereRaw('LOWER(username) = LOWER(?)', [canonical]).andWhere({ discriminator: disc }).first();
+        if (!existing) return disc;
+    }
+    for (let i = 0; i < 10000; i++) {
+        const disc = String(i).padStart(4, '0');
+        const existing = await db('users').whereRaw('LOWER(username) = LOWER(?)', [canonical]).andWhere({ discriminator: disc }).first();
+        if (!existing) return disc;
+    }
+    throw new Error('Unable to generate unique discriminator');
+}
+
 export async function registerUser({ username, name, password, email }) {
     const canonical = String(username || '').toLowerCase();
     const existingUser = await db('users').whereRaw('LOWER(username) = LOWER(?)', [canonical]).first();
@@ -24,10 +40,13 @@ export async function registerUser({ username, name, password, email }) {
     const id = generateUUID();
     const hashedPassword = await hashPassword(password);
 
+    // generate a unique 4-digit discriminator server-side (do not allow client-controlled discriminator)
+    const discriminator = await generateUniqueDiscriminatorForUsername(canonical);
+
     await db('users').insert({
         id,
         username: canonical,
-        discriminator: '0000', // caller can override if desired
+        discriminator,
         name,
         password: hashedPassword,
         email: email ? String(email).toLowerCase() : null
@@ -79,21 +98,13 @@ export async function revokeAllRefreshTokensForUser(userId, reason = 'compromise
     await db('refresh_tokens').where({ user_id: userId }).update({ revoked: true, revoked_at: new Date(), revoked_reason: reason });
 }
 
-export async function loginUser({ usernameWithDisc, password }, metadata = {}) {
-    // expecting usernameWithDisc like 'alice#1234' or username alone
-    let username = usernameWithDisc || '';
-    let discriminator = null;
-    if (username.includes('#')) {
-        const parts = username.split('#');
-        username = parts[0];
-        discriminator = parts[1];
-    }
-    const canonical = String(username).toLowerCase();
-    const query = db('users').where({ username: canonical });
-    if (discriminator) query.andWhere({ discriminator });
-    const user = await query.first();
+export async function loginUser({ email, password }, metadata = {}) {
+    // login using email
+    if (!email) throw new Error('Email required');
+    const canonicalEmail = String(email).toLowerCase();
+    const user = await db('users').whereRaw('LOWER(email) = LOWER(?)', [canonicalEmail]).first();
     if (!user) {
-        throw new Error('Invalid username or password');
+        throw new Error('Invalid email or password');
     }
 
     const isPasswordValid = await comparePassword(password, user.password);
@@ -218,7 +229,7 @@ export async function createOrFindUserByGoogle(profile) {
         const userId = generateUUID();
         // Generate a sanitized username base
         const base = (name || 'user').toLowerCase().replace(/[^a-z0-9._-]/g, '').slice(0,28) || 'user';
-        const disc = Math.floor(Math.random() * 10000).toString().padStart(4,'0');
+        const disc = await generateUniqueDiscriminatorForUsername(base);
         await db('users').insert({
             id: userId,
             username: base,
