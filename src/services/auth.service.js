@@ -249,24 +249,53 @@ export async function createOrFindUserByGoogle(profile) {
         return db('users').where({id: existingOAuth.user_id}).first();
     }
 
-    // Try to find by oauth_info.email mapping if present; otherwise create a user with generated username
+    // Try to find a user by verified email first (safer than matching username local-part).
+    // If not found, create a new user. When creating, generate a sanitized username base
+    // (prefer email local-part, then name) and retry discriminator generation + insert
+    // to avoid unique-constraint races.
     let user = null;
-    if (email) {
-      user = await db('users').where({}).whereRaw('LOWER(username) = LOWER(?)', [email.split('@')[0]]).first();
+    const emailLower = email ? String(email).toLowerCase() : null;
+    if (emailLower) {
+        user = await db('users').whereRaw('LOWER(email) = LOWER(?)', [emailLower]).first();
     }
+
     if (!user) {
         const userId = generateUUID();
-        // Generate a sanitized username base
-        const base = (name || 'user').toLowerCase().replace(/[^a-z0-9._-]/g, '').slice(0,28) || 'user';
-        const disc = await generateUniqueDiscriminatorForUsername(base);
-        await db('users').insert({
-            id: userId,
-            username: base,
-            discriminator: disc,
-            name,
-            avatar_url: avatarUrl,
-            email: email ? String(email).toLowerCase() : null,
-        });
+
+        // Choose a username base: prefer email local part, then name, then 'user'
+        const localPart = emailLower ? emailLower.split('@')[0] : null;
+        let base = (localPart || name || 'user').toLowerCase().replace(/[^a-z0-9._-]/g, '').slice(0,28) || 'user';
+
+        // Try inserting with generated discriminators, retrying on unique-constraint failures
+        let inserted = false;
+        let lastErr = null;
+        const maxAttempts = 5;
+        for (let attempt = 0; attempt < maxAttempts && !inserted; attempt++) {
+            const disc = await generateUniqueDiscriminatorForUsername(base);
+            try {
+                await db('users').insert({
+                    id: userId,
+                    username: base,
+                    discriminator: disc,
+                    name,
+                    avatar_url: avatarUrl,
+                    email: emailLower || null,
+                });
+                inserted = true;
+            } catch (err) {
+                lastErr = err;
+                // If error looks like a unique constraint violation on (username, discriminator),
+                // retry (another discriminator). For other errors, rethrow.
+                const msg = err && err.message ? String(err.message).toLowerCase() : '';
+                const code = err && err.code ? String(err.code) : '';
+                const isUniqueErr = msg.includes('unique') || msg.includes('duplicate') || code === '23505' || code === 'ER_DUP_ENTRY' || code === 'SQLITE_CONSTRAINT';
+                if (!isUniqueErr) throw err;
+                // otherwise loop and try a new discriminator
+            }
+        }
+        if (!inserted) {
+            throw lastErr || new Error('Failed to create user');
+        }
         user = await db('users').where({ id: userId }).first();
     }
     await db('oauth_info').insert({
