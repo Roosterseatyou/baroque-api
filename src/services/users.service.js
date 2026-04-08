@@ -129,11 +129,14 @@ export async function deleteUserData(userId) {
                     await auditService.writeAudit({ entityType: 'organization', entityId: orgId, action: 'organization_soft_deleted', details: { reason: 'owner_deleted_no_admin', scheduled_days: days }, performedBy: userId }, trx);
                 } catch (e) {
                     // fallback to hard delete if update fails for any reason — use service helper to remove all library data
-                    try {
-                        await orgsService.hardDeleteOrganization(orgId, trx);
-                    } catch (innerErr) {
-                        throw innerErr;
-                    }
+                        try {
+                            // Ensure we pass performedBy (null) and the transaction as the third argument
+                            // so the hard delete runs inside the current transaction and audit logs record the
+                            // correct performer (null in this fallback case).
+                            await orgsService.hardDeleteOrganization(orgId, null, trx);
+                        } catch (innerErr) {
+                            throw innerErr;
+                        }
                 }
             }
         }
