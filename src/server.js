@@ -166,7 +166,7 @@ async function init() {
             console.error('Error starting deletion worker inline:', err);
         })
     } else {
-        console.log('Deletion worker not started in-process. Run `npm run deletion-worker` to start the separate worker.');
+        console.log('Deletion worker not started in-process. Run `npm run worker:deletion` to start the separate worker.');
     }
     const shutdown = async () => {
         console.log("Shutting down server...");
