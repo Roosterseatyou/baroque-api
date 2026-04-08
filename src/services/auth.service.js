@@ -99,12 +99,41 @@ export async function revokeAllRefreshTokensForUser(userId, reason = 'compromise
 }
 
 export async function loginUser({ email, password }, metadata = {}) {
-    // login using email
-    if (!email) throw new Error('Email required');
-    const canonicalEmail = String(email).toLowerCase();
-    const user = await db('users').whereRaw('LOWER(email) = LOWER(?)', [canonicalEmail]).first();
-    if (!user) {
-        throw new Error('Invalid email or password');
+    // "email" parameter is treated as the user-supplied identifier which may be:
+    // - an email address
+    // - a username#discriminator handle (e.g. 'alice#0123')
+    // - a bare username (e.g. 'alice')
+    // To avoid authenticating an arbitrary user when usernames are not globally unique,
+    // require the discriminator when the bare username maps to multiple accounts.
+    if (!email) throw new Error('Email or username required');
+    const identifier = String(email).trim();
+
+    let user = null;
+
+    // If input contains an @ treat as email
+    if (identifier.includes('@')) {
+        const canonicalEmail = identifier.toLowerCase();
+        user = await db('users').whereRaw('LOWER(email) = LOWER(?)', [canonicalEmail]).first();
+        if (!user) throw new Error('Invalid email or password');
+    } else if (identifier.includes('#')) {
+        // username#discriminator
+        const parts = identifier.split('#');
+        const usernamePart = parts[0] || '';
+        const discPart = parts[1] || '';
+        if (!usernamePart || !discPart) throw new Error('Invalid username handle format; use username#1234');
+        user = await db('users').whereRaw('LOWER(username) = LOWER(?)', [usernamePart.toLowerCase()]).andWhere({ discriminator: discPart }).first();
+        if (!user) throw new Error('Invalid username or password');
+    } else {
+        // bare username: ensure it maps to exactly one account, otherwise require discriminator
+        const matches = await db('users').whereRaw('LOWER(username) = LOWER(?)', [identifier.toLowerCase()]).select('*');
+        if (!matches || matches.length === 0) {
+            throw new Error('Invalid username or password');
+        }
+        if (matches.length > 1) {
+            // Ambiguous: multiple users share this username (discriminator required)
+            throw new Error('Ambiguous username; please login using username#1234');
+        }
+        user = matches[0];
     }
 
     const isPasswordValid = await comparePassword(password, user.password);
