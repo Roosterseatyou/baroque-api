@@ -91,6 +91,16 @@ export async function getPiece(req, res) {
 
 export async function getPieces(req, res) {
     try {
+        // If pagination params are provided, use paged service to avoid returning full dataset for large libraries
+        const page = req.query && (req.query.page || req.query.per_page || req.query.perPage)
+        if (page) {
+            const pageNum = Number(req.query.page) || 1
+            const perPage = Number(req.query.per_page || req.query.perPage) || 20
+            const sortField = req.query.sortField || req.query.sort || 'title'
+            const sortDir = req.query.sortDir || req.query.sort_dir || req.query.sortDirection || 'asc'
+            const { pieces, total } = await piecesService.getPiecesPaged(req.params.libraryId, { page: pageNum, perPage, sortField, sortDir })
+            return res.status(200).json({ pieces, total })
+        }
         const pieces = await piecesService.getPieces(req.params.libraryId);
         res.status(200).json(pieces);
     } catch (error) {

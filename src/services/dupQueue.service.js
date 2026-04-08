@@ -32,14 +32,40 @@ export async function scheduleScan(libraryId) {
 
 // Process pending jobs. This should be run by a background worker (or periodically from server startup).
 export async function processPendingJobs({ limit = 5 } = {}) {
+  // Recover stale 'running' jobs that might have been left by a timed-out worker
+  try {
+    const WORKER_TIMEOUT_MS = Number(process.env.DUP_WORKER_TIMEOUT_MS || 5 * 60 * 1000);
+    const staleCutoff = new Date(Date.now() - WORKER_TIMEOUT_MS - 60000); // extra 60s buffer
+    const staleRunning = await db('duplicate_scan_jobs').where({ status: 'running' }).andWhere('started_at', '<', staleCutoff).select();
+    for (const r of staleRunning) {
+      const attemptsNow = (r.attempts || 0);
+      if (attemptsNow >= MAX_ATTEMPTS) {
+        try {
+          await db('duplicate_scan_jobs').where({ id: r.id }).update({ status: 'failed', last_error: 'stale-running-exceeded-attempts', updated_at: db.fn.now() });
+          console.warn(`Duplicate scan job id=${r.id} marked failed due to stale running state (attempts=${attemptsNow})`);
+        } catch (e) { console.error('Failed to mark stale running job as failed', r.id, e); }
+      } else {
+        try {
+          await db('duplicate_scan_jobs').where({ id: r.id }).update({ status: 'pending', updated_at: db.fn.now() });
+          console.warn(`Requeued stale running duplicate_scan_job id=${r.id} for retry (attempts=${attemptsNow})`);
+        } catch (e) { console.error('Failed to requeue stale running job', r.id, e); }
+      }
+    }
+  } catch (e) {
+    console.warn('Failed to recover stale running duplicate scan jobs', e);
+  }
+
   // fetch pending jobs
   const jobs = await db('duplicate_scan_jobs')
     .whereIn('status', ['pending'])
     .orderBy('created_at', 'asc')
     .limit(limit);
 
+  // maximum attempts before marking a job as permanently failed
+  const MAX_ATTEMPTS = Number(process.env.DUP_MAX_ATTEMPTS || 3);
+
   for (const j of jobs) {
-    // mark as running
+    // mark as running and increment attempts (attempt count represents attempts started)
     await db('duplicate_scan_jobs').where({ id: j.id, status: 'pending' }).update({ status: 'running', started_at: db.fn.now(), attempts: j.attempts + 1, updated_at: db.fn.now() });
     try {
       // Use worker_threads if available to avoid blocking main thread when run inline
@@ -58,16 +84,32 @@ export async function processPendingJobs({ limit = 5 } = {}) {
           const w = new WorkerImpl(new URL('../worker/findDuplicatesWorker.js', import.meta.url), { workerData: { libraryId: j.library_id } });
           const timeout = Number(process.env.DUP_WORKER_TIMEOUT_MS || 5 * 60 * 1000);
           let timer = setTimeout(() => {
-            try { w.terminate(); } catch (e) {}
+            // try to terminate the worker and reject with timeout
+            try { w.terminate(); } catch (e) { /* ignore */ }
             reject(new Error('Worker timed out'));
           }, timeout);
+          let settled = false;
+          const cleanUp = () => { if (timer) { clearTimeout(timer); timer = null } };
+
           w.on('message', (m) => {
-            clearTimeout(timer);
+            if (settled) return
+            settled = true
+            cleanUp()
             if (m && m.success) resolve(m.groups);
             else reject(new Error(m && m.error ? m.error : 'Worker failed'));
           });
-          w.on('error', (err) => { clearTimeout(timer); reject(err); });
-          w.on('exit', (code) => { if (code !== 0) { clearTimeout(timer); /* handled in error handler */ } });
+          w.on('error', (err) => { if (settled) return; settled = true; cleanUp(); reject(err); });
+          w.on('exit', (code) => {
+            if (settled) return;
+            settled = true;
+            cleanUp();
+            if (code === 0) {
+              // worker exited cleanly but did not send a message; treat as failure
+              reject(new Error('Worker exited without result'));
+            } else {
+              reject(new Error(`Worker exited with code ${code}`));
+            }
+          });
         });
       } else {
         groups = await piecesService.findDuplicatesInLibrary(j.library_id);
@@ -77,7 +119,28 @@ export async function processPendingJobs({ limit = 5 } = {}) {
       await db('duplicate_scan_jobs').where({ id: j.id }).update({ status: 'done', result: JSON.stringify(sanitized), cached_at: Date.now(), finished_at: db.fn.now(), updated_at: db.fn.now() });
     } catch (err) {
       console.error('Failed processing duplicate scan job', j.id, err);
-      await db('duplicate_scan_jobs').where({ id: j.id }).update({ status: 'failed', last_error: String(err && err.message ? err.message : err), updated_at: db.fn.now() });
+      // If the job has attempts remaining, requeue it as 'pending' to retry later.
+      const attemptsNow = (j.attempts || 0) + 1;
+      const lastError = String(err && err.message ? err.message : err);
+      if (attemptsNow < MAX_ATTEMPTS) {
+        // Requeue for another attempt
+        try {
+          await db('duplicate_scan_jobs').where({ id: j.id }).update({ status: 'pending', last_error: lastError, updated_at: db.fn.now() });
+          console.warn(`Requeued duplicate_scan_job id=${j.id} for retry (attempt ${attemptsNow}/${MAX_ATTEMPTS})`);
+        } catch (updErr) {
+          console.error('Failed to requeue duplicate scan job', j.id, updErr);
+          // if requeue failed, mark as failed
+          await db('duplicate_scan_jobs').where({ id: j.id }).update({ status: 'failed', last_error: `${lastError}; requeue failed: ${updErr && updErr.message ? updErr.message : updErr}`, updated_at: db.fn.now() });
+        }
+      } else {
+        // Exhausted attempts: mark as permanently failed
+        try {
+          await db('duplicate_scan_jobs').where({ id: j.id }).update({ status: 'failed', last_error: lastError, updated_at: db.fn.now() });
+          console.warn(`Duplicate scan job id=${j.id} marked failed after ${attemptsNow} attempts`);
+        } catch (updErr) {
+          console.error('Failed to mark duplicate scan job as failed', j.id, updErr);
+        }
+      }
     }
   }
 
@@ -89,7 +152,8 @@ export async function getLatestForLibrary(libraryId) {
   const job = await db('duplicate_scan_jobs').where({ library_id: libraryId }).orderBy('created_at', 'desc').first();
   if (!job) return { groups: [], cachedAt: null, scanning: false };
   if (job.status === 'pending' || job.status === 'running') return { groups: job.result ? safeParseResult(job.result) : [], cachedAt: job.cached_at || null, scanning: true };
-  return { groups: job.result ? safeParseResult(job.result) : [], cachedAt: job.cached_at || null, scanning: job.status !== 'done' };
+  // For 'failed' or any other terminal status, return cached result (if any) and indicate not scanning
+  return { groups: job.result ? safeParseResult(job.result) : [], cachedAt: job.cached_at || null, scanning: false };
 }
 
 function safeParseResult(r) {
