@@ -4,6 +4,10 @@ import * as tagsService from '../services/tags.service.js';
 import * as dupQueue from '../services/dupQueue.service.js';
 import crypto from 'crypto';
 
+// throttle duplicate-scan logging per-library to avoid spamming logs when clients poll
+const _recentDupLogAt = new Map();
+const DUP_LOG_TTL_MS = Number(process.env.DUP_LOG_TTL_MS) || (10 * 60 * 1000); // 10 minutes
+
 function _serverNormalizePayload(payload, opts = {}) {
     if (!payload) return { groups: [], cachedAt: null, scanning: false };
     // If payload is an array (legacy), return as groups
@@ -82,7 +86,6 @@ function _serverNormalizePayload(payload, opts = {}) {
     // Sort by severity (very-high, high, medium) and within each severity
     // sort by numeric library number when available (ascending). Fallback to
     // group size desc then titleExample.
-    const severityOrder = { 'very-high': 0, 'high': 1, 'medium': 2 };
 
     function extractLibNum(g) {
         // Try titleKey of form 'libnum:NNN'
@@ -124,34 +127,56 @@ function _serverNormalizePayload(payload, opts = {}) {
     // Recombine in severity order
     const combined = [...buckets['very-high'], ...buckets['high'], ...buckets['medium'], ...buckets['other']];
 
-    // Heuristic: if result looks malformed (very many groups with little info), avoid returning them
+    // Heuristic: if result looks malformed (very many groups with little info), mark it suspicious
+    // but do NOT hide results entirely. Returning an empty scanning payload makes the UI wait
+    // indefinitely and offers a poor UX. Instead, return paginated groups and include
+    // metadata (truncated/suspicious) so clients can render partial results immediately.
     const MAX_GROUPS = 200; // safe upper-bound for single-page fallback
     const total = combined.length;
     const lowInfoCount = combined.filter(g => (!g.titleExample || !g.titleExample.trim()) || (Array.isArray(g.pieces) && g.pieces.length < 2)).length;
-    // If more than 200 groups OR more than 80% are low-info, treat as not-yet-ready and return scanning state
+    // Throttle logging so repeated client polling doesn't spam logs. Use opts.libraryId if available.
+    const libId = opts.libraryId || null;
+    const now = Date.now();
+    const shouldLog = (() => {
+        if (!libId) return true; // no library context — log
+        const last = _recentDupLogAt.get(libId) || 0;
+        if (now - last > DUP_LOG_TTL_MS) { _recentDupLogAt.set(libId, now); return true }
+        return false
+    })();
     if (total > 200 || (total > 0 && (lowInfoCount / total) > 0.8)) {
-        console.warn(`Duplicate scan returned suspiciously large/low-info payload (groups=${total}, lowInfo=${lowInfoCount}); returning empty scanning payload`);
-        return { groups: [], cachedAt: payload.cachedAt || payload.cached_at || null, scanning: true, truncated: true };
+        if (shouldLog) console.warn(`Duplicate scan returned suspiciously large/low-info payload (groups=${total}, lowInfo=${lowInfoCount}); returning paginated/truncated payload instead of empty scanning state`);
     }
 
     // Apply pagination: opts.perPage / opts.page
-    const perPage = Number(opts.perPage || opts.per_page) || 50;
+    const requestedPerPage = Number(opts.perPage || opts.per_page) || 50;
     const page = Math.max(1, Number(opts.page) || 1);
+    // Cap perPage to MAX_GROUPS so pagination metadata remains consistent with returned groups
+    const perPage = Math.max(1, Math.min(requestedPerPage, MAX_GROUPS));
     const totalPages = Math.max(1, Math.ceil(total / perPage));
 
     const start = (page - 1) * perPage;
     const end = start + perPage;
     const pageSlice = combined.slice(start, end);
     const truncated = total > perPage;
-    out.groups = pageSlice.slice(0, MAX_GROUPS);
+    // pageSlice length will be <= perPage and perPage <= MAX_GROUPS, so no extra slicing needed
+    out.groups = pageSlice;
     out.cachedAt = payload.cachedAt || payload.cached_at || null;
     out.scanning = !!payload.scanning;
     if (truncated) out.truncated = true;
+    // indicate that the result exceeded heuristics so clients can surface an explanatory UI if desired
+    if (total > 200 || (total > 0 && (lowInfoCount / total) > 0.8)) out.suspicious = true;
     // pagination metadata
     out.total = total;
     out.page = page;
     out.perPage = perPage;
     out.totalPages = totalPages;
+    // optionally emit a small sample debug log (throttled) to help debugging without spamming
+    try {
+        if (shouldLog && Array.isArray(out.groups) && out.groups.length > 0) {
+            const sample = out.groups.slice(0,3).map(g => ({ titleExample: g.titleExample, piecesLen: Array.isArray(g.pieces) ? g.pieces.length : 0, severity: g.severity }));
+            console.debug('[duplicates] sample groups:', JSON.stringify(sample));
+        }
+    } catch (e) { /* ignore logging errors */ }
     return out;
 }
 
@@ -173,6 +198,23 @@ function _cleanupImportCache() {
 
 // schedule periodic cleanup (low-frequency)
 setInterval(_cleanupImportCache, IMPORT_CACHE_TTL_MS);
+
+// Periodic cleanup for recent duplicate-log timestamps to avoid unbounded Map growth.
+// Entries older than DUP_LOG_TTL_MS will be evicted. This mirrors the import cache
+// cleanup behavior and runs at low frequency to avoid overhead.
+function _cleanupRecentDupLogAt() {
+    const now = Date.now();
+    for (const [k, v] of _recentDupLogAt.entries()) {
+        try {
+            if (now - (v || 0) > DUP_LOG_TTL_MS) _recentDupLogAt.delete(k);
+        } catch (e) {
+            // swallow to avoid crashing periodic cleanup
+        }
+    }
+}
+
+// Run cleanup at the same cadence as the TTL (low frequency)
+setInterval(_cleanupRecentDupLogAt, DUP_LOG_TTL_MS);
 
 export async function createLibrary(req, res) {
     try {
@@ -394,19 +436,8 @@ export async function findLibraryDuplicates(req, res) {
         const page = Number(req.query?.page) || 1;
         const perPage = Number(req.query?.per_page || req.query?.perPage) || undefined;
         const payload = await piecesService.findDuplicatesInLibraryCached(libraryId);
-        // Debug: log payload shape for troubleshooting
-        try {
-            const rawGroups = payload?.groups ?? payload?.result ?? [];
-            console.debug('[duplicates] payload type=%s groupsType=%s groupsCount=%d', typeof payload, typeof rawGroups, Array.isArray(rawGroups) ? rawGroups.length : 0);
-            if (Array.isArray(rawGroups) && rawGroups.length > 0) {
-                const sample = rawGroups.slice(0,3).map(g => ({ titleExample: g?.titleExample ?? g?.title_example, piecesLen: Array.isArray(g?.pieces) ? g.pieces.length : (Array.isArray(g?.result) ? g.result.length : (g && typeof g === 'string' ? g.length : 0)), severity: g?.severity }));
-                console.debug('[duplicates] sample groups:', JSON.stringify(sample));
-            }
-        } catch (logErr) {
-            console.warn('Failed to debug-log duplicates payload', logErr);
-        }
         // normalize payload shape before returning to clients (supports pagination)
-        return res.status(200).json(_serverNormalizePayload(payload, { page, perPage }));
+        return res.status(200).json(_serverNormalizePayload(payload, { page, perPage, libraryId }));
     } catch (err) {
         console.error('findLibraryDuplicates error', err);
         res.status(500).json({ error: err.message });
@@ -423,13 +454,7 @@ export async function findLibraryDuplicatesPublic(req, res) {
         const page = Number(req.query?.page) || 1;
         const perPage = Number(req.query?.per_page || req.query?.perPage) || undefined;
         const payload = await piecesService.findDuplicatesInLibraryCached(lib.id);
-        try {
-            const rawGroups = payload?.groups ?? payload?.result ?? [];
-            console.debug('[duplicates:public] payload type=%s groupsType=%s groupsCount=%d', typeof payload, typeof rawGroups, Array.isArray(rawGroups) ? rawGroups.length : 0);
-        } catch (logErr) {
-            console.warn('Failed to debug-log public duplicates payload', logErr);
-        }
-        return res.status(200).json(_serverNormalizePayload(payload, { page, perPage }));
+        return res.status(200).json(_serverNormalizePayload(payload, { page, perPage, libraryId: lib.id }));
     } catch (err) {
         console.error('findLibraryDuplicatesPublic error', err);
         return res.status(500).json({ error: err.message });

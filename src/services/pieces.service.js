@@ -61,6 +61,7 @@ export async function getPieceById(pieceId) {
 }
 
 export async function getPieces(libraryId) {
+    // Backwards-compatible: return all pieces when called without pagination
     const pieces = await db('pieces')
         .where({ library_id: libraryId });
     const pieceIds = pieces.map(p => p.id);
@@ -82,6 +83,53 @@ export async function getPieces(libraryId) {
         for (const c of cols) collectionsById[c.id] = c;
     }
     return pieces.map(p => ({ ...p, tags: tagsByPiece[p.id] || [], quantity: p.quantity != null ? Number(p.quantity) : 1, collection: p.collection_id ? (collectionsById[p.collection_id] || null) : null }));
+}
+
+// New: paginated fetch for pieces. Returns { pieces, total }
+export async function getPiecesPaged(libraryId, { page = 1, perPage = 20, sortField = 'title', sortDir = 'asc' } = {}) {
+    const p = Math.max(1, Number(page) || 1)
+    // enforce a maximum per-page to avoid very large responses / expensive queries
+    const PIECES_MAX_PER_PAGE = Number(process.env.PIECES_MAX_PER_PAGE || 200)
+    const ppRaw = Number(perPage) || 20
+    const pp = Math.max(1, Math.min(ppRaw, PIECES_MAX_PER_PAGE))
+    const offset = (p - 1) * pp
+
+    // get total count
+    const [{ count }] = await db('pieces').where({ library_id: libraryId }).count('* as count')
+    const total = Number(count || 0)
+
+    // fetch paged rows with ordering
+    // Whitelist allowed sort fields to avoid SQL errors or unintended column access
+    const allowedSortFields = ['title', 'composer', 'library_number', 'created_at', 'instrumentation', 'quantity']
+    const defaultSort = 'title'
+    const sf = String(sortField || defaultSort).toLowerCase()
+    const orderField = allowedSortFields.includes(sf) ? sf : defaultSort
+    const dir = (String(sortDir || 'asc').toLowerCase() === 'desc') ? 'desc' : 'asc'
+
+    const rows = await db('pieces').where({ library_id: libraryId }).orderBy(orderField, dir).limit(pp).offset(offset)
+
+    if (!rows || rows.length === 0) return { pieces: [], total }
+
+    const pieceIds = rows.map(p => p.id)
+    const tagRows = await db('piece_tags')
+        .join('tags', 'piece_tags.tag_id', 'tags.id')
+        .whereIn('piece_tags.piece_id', pieceIds)
+        .select('piece_tags.piece_id as piece_id', 'tags.id as id', 'tags.name as name');
+    const tagsByPiece = {};
+    for (const row of tagRows) {
+        tagsByPiece[row.piece_id] = tagsByPiece[row.piece_id] || [];
+        tagsByPiece[row.piece_id].push({ id: row.id, name: row.name });
+    }
+
+    const collectionIds = [...new Set(rows.map(p => p.collection_id).filter(Boolean))];
+    let collectionsById = {};
+    if (collectionIds.length) {
+        const cols = await db('collections').whereIn('id', collectionIds).select('id','name','library_number');
+        for (const c of cols) collectionsById[c.id] = c;
+    }
+
+    const piecesOut = rows.map(p => ({ ...p, tags: tagsByPiece[p.id] || [], quantity: p.quantity != null ? Number(p.quantity) : 1, collection: p.collection_id ? (collectionsById[p.collection_id] || null) : null }))
+    return { pieces: piecesOut, total }
 }
 
 export async function updatePiece(pieceId, data) {
@@ -358,39 +406,52 @@ export async function findDuplicatesInLibrary(libraryId) {
     }
 
     // Fuzzy cluster remaining items by title AND composer similarity.
-    // If composer metadata is missing for one or both pieces, fall back to
-    // a stricter title-only grouping so we still surface likely duplicates
-    // when composer fields are absent.
-    for (let i = 0; i < items.length; i++) {
-        if (used[i]) continue;
-        const base = items[i];
-        const cluster = { titleKey: base.nkTitle, titleExample: base.raw.title || '', pieces: [base.raw] };
-        used[i] = true;
-        for (let j = i + 1; j < items.length; j++) {
-            if (used[j]) continue;
-            const other = items[j];
-            const titleSim = similarity(base.nkTitle, other.nkTitle);
-            const baseCompRaw = base.raw.composer || '';
-            const otherCompRaw = other.raw.composer || '';
+    // To avoid O(n^2) comparisons on very large libraries, first bucket items
+    // by a prefix of their normalized title. Only items within the same bucket
+    // are compared pairwise. This preserves matching quality while reducing
+    // the total number of comparisons in typical datasets.
+    const BUCKET_PREFIX_LEN = 10; // tuneable: number of chars from normalized title
+    const bucketMap = new Map();
+    for (let idx = 0; idx < items.length; idx++) {
+        if (used[idx]) continue;
+        const key = (items[idx].nkTitle || '').slice(0, BUCKET_PREFIX_LEN);
+        if (!bucketMap.has(key)) bucketMap.set(key, []);
+        bucketMap.get(key).push(idx);
+    }
 
-            // When both composers exist, prefer composer+title matching to avoid
-            // false positives. When one or both composers are missing, allow a
-            // stricter title-only grouping using TITLE_STRICT_THRESHOLD.
-            if (baseCompRaw && otherCompRaw) {
-                const compSim = composerSimilar(baseCompRaw, otherCompRaw);
-                if (titleSim >= TITLE_SIM_THRESHOLD && compSim) {
-                    cluster.pieces.push(other.raw);
-                    used[j] = true;
-                }
-            } else {
-                // Fallback: strict title similarity only
-                if (titleSim >= TITLE_STRICT_THRESHOLD) {
-                    cluster.pieces.push(other.raw);
-                    used[j] = true;
+    for (const [prefix, idxs] of bucketMap.entries()) {
+        // run clustering within this bucket
+        for (let bi = 0; bi < idxs.length; bi++) {
+            const i = idxs[bi];
+            if (used[i]) continue;
+            const base = items[i];
+            const cluster = { titleKey: base.nkTitle, titleExample: base.raw.title || '', pieces: [base.raw] };
+            used[i] = true;
+            for (let bj = bi + 1; bj < idxs.length; bj++) {
+                const j = idxs[bj];
+                if (used[j]) continue;
+                const other = items[j];
+                const titleSim = similarity(base.nkTitle, other.nkTitle);
+                const baseCompRaw = base.raw.composer || '';
+                const otherCompRaw = other.raw.composer || '';
+
+                // When both composers exist, prefer composer+title matching to avoid false positives.
+                if (baseCompRaw && otherCompRaw) {
+                    const compSim = composerSimilar(baseCompRaw, otherCompRaw);
+                    if (titleSim >= TITLE_SIM_THRESHOLD && compSim) {
+                        cluster.pieces.push(other.raw);
+                        used[j] = true;
+                    }
+                } else {
+                    // Fallback: strict title similarity only
+                    if (titleSim >= TITLE_STRICT_THRESHOLD) {
+                        cluster.pieces.push(other.raw);
+                        used[j] = true;
+                    }
                 }
             }
+            if (cluster.pieces.length > 1) groups.push(cluster);
         }
-        if (cluster.pieces.length > 1) groups.push(cluster);
     }
 
     // compute severity for non-libnum groups
