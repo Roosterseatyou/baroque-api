@@ -39,12 +39,25 @@ export async function addMember(req, res) {
         const { userId, username, role } = req.body;
         // If a direct userId is provided and caller wants immediate add, honor it
         if (userId) {
-            // default role
-            const inviteRole = role || 'viewer'
-            const existing = await orgsService.getMembershipForUser(req.params.organizationId, userId);
-            if (existing) return res.status(409).json({ error: 'User is already a member of this organization' });
-            const membership = await orgsService.addMemberToOrganization({ organizationId: req.params.organizationId, userId, role: inviteRole });
-            return res.status(201).json(membership);
+                    // Direct add path: require an elevated requester role (owner/admin/manager).
+                    // Default role for the new member
+                    const inviteRole = role || 'viewer'
+
+                    const requesterId = req.user && req.user.id
+                    const requesterMembership = await orgsService.getMembershipForUser(req.params.organizationId, requesterId)
+                    if (!requesterMembership || !['owner','admin','manager'].includes(requesterMembership.role)) {
+                        return res.status(403).json({ error: 'Forbidden' })
+                    }
+
+                    // Admins cannot add an owner
+                    if (requesterMembership.role === 'admin' && inviteRole === 'owner') {
+                        return res.status(403).json({ error: 'Admins cannot assign owner role' })
+                    }
+
+                    const existing = await orgsService.getMembershipForUser(req.params.organizationId, userId);
+                    if (existing) return res.status(409).json({ error: 'User is already a member of this organization' });
+                    const membership = await orgsService.addMemberToOrganization({ organizationId: req.params.organizationId, userId, role: inviteRole });
+                    return res.status(201).json(membership);
         }
 
         // Otherwise create an invitation record so the target user can accept/decline
