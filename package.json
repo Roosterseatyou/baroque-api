@@ -9,6 +9,7 @@
     "start:prod": "NODE_ENV=production node ./src/server.js",
     "dev": "nodemon --watch src --exec node ./src/server.js",
     "worker": "node ./src/worker/dupWorker.js",
+    "worker:deletion": "node ./src/worker/deletionWorker.js",
     "migrate": "npx knex migrate:latest --knexfile ./knexfile.cjs",
     "migrate:rollback": "npx knex migrate:rollback --knexfile ./knexfile.cjs",
     "test": "jest",

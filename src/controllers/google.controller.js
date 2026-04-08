@@ -75,17 +75,20 @@ export async function callback(req, res) {
     const name = ui && ui.name
     const avatarUrl = ui && ui.picture
 
+    // Prefer mapping via existing oauth_info record (provider_user_id) earlier handled above.
+    // If no mapping, attempt to match by username base derived from email local-part as a fallback.
     if (!userId && email) {
       try {
-        const userRow = await knex('users').where({ email }).first()
+        const base = email.split('@')[0];
+        const userRow = await knex('users').whereRaw('LOWER(username) = LOWER(?)', [base]).first();
         if (userRow) {
           userId = userRow.id
-          debug.debugLog('google.callback: mapped to user by email', email, userId)
+          debug.debugLog('google.callback: mapped to user by username base from email', base, userId)
         } else {
-          console.warn('google.callback: no local user for google email', email)
+          console.warn('google.callback: no local user for google email-derived username', base)
         }
       } catch (e) {
-        console.warn('google.callback: failed to lookup user by email', e && e.message)
+        console.warn('google.callback: failed to lookup user by derived username', e && e.message)
       }
     }
 

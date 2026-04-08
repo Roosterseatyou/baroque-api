@@ -21,10 +21,73 @@ export async function getUserOrganizations(userId) {
     return organizations;
 }
 
-export async function updateUserProfile(userId, { name, email }) {
+// Helper: generate a unique 4-digit numeric discriminator for a username
+async function generateUniqueDiscriminator(username) {
+    const canonical = String(username || '').toLowerCase();
+    // Try some random attempts first
+    for (let attempt = 0; attempt < 50; attempt++) {
+        const disc = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
+        const existing = await db('users').whereRaw('LOWER(username) = LOWER(?)', [canonical]).andWhere({ discriminator: disc }).first();
+        if (!existing) return disc;
+    }
+    // Fallback to linear search
+    for (let i = 0; i < 10000; i++) {
+        const disc = String(i).padStart(4, '0');
+        const existing = await db('users').whereRaw('LOWER(username) = LOWER(?)', [canonical]).andWhere({ discriminator: disc }).first();
+        if (!existing) return disc;
+    }
+    throw new Error('Unable to generate unique discriminator');
+}
+
+export async function updateUserProfile(userId, { name, username, discriminator, email } = {}) {
+    const update = {};
+
+    // Load current user to decide whether discriminator assignment is needed
+    const currentUser = await db('users').where({ id: userId }).first();
+    if (!currentUser) throw new Error('User not found');
+
+    if (typeof name !== 'undefined') update.name = name;
+    if (typeof username !== 'undefined') update.username = String(username).toLowerCase();
+
+    // Ignore client-provided discriminator. Server will assign one when appropriate.
+    // If username changed or the user currently has no discriminator, generate one server-side.
+    if (typeof username !== 'undefined') {
+        const newUsernameCanonical = String(username || '').toLowerCase();
+        const currentUsernameCanonical = String(currentUser.username || '').toLowerCase();
+        if (newUsernameCanonical !== currentUsernameCanonical || !currentUser.discriminator) {
+            const disc = await generateUniqueDiscriminator(newUsernameCanonical);
+            update.discriminator = disc;
+        }
+    } else if (!currentUser.discriminator) {
+        // username unchanged but discriminator missing - generate one for existing username
+        const disc = await generateUniqueDiscriminator(currentUser.username || currentUser.email?.split('@')[0] || 'user');
+        update.discriminator = disc;
+    }
+
+    // Explicit email handling: validate and ensure uniqueness if provided
+    if (typeof email !== 'undefined') {
+        if (email) {
+            const emailStr = String(email).toLowerCase();
+            // basic email format validation
+            const emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+            if (!emailRe.test(emailStr)) throw new Error('Invalid email format');
+            // ensure no other user has this email
+            const existing = await db('users').whereRaw('LOWER(email) = LOWER(?)', [emailStr]).andWhereNot({ id: userId }).first();
+            if (existing) throw new Error('Email already in use');
+            update.email = emailStr;
+        } else {
+            // explicit null to clear email
+            update.email = null;
+        }
+    }
+
+    if (Object.keys(update).length === 0) {
+        return await getUserById(userId);
+    }
+
     await db('users')
         .where({ id: userId })
-        .update({ name, email });
+        .update(update);
 
     const updatedUser = await getUserById(userId);
     return updatedUser;
@@ -43,15 +106,18 @@ export async function createUserData(userId, { orgName } = {}) {
 }
 
 export async function deleteUserData(userId) {
-    // Safe deletion: transfer ownership of organizations the user owns to another admin if possible,
-    // otherwise delete the organization (cascade will remove related rows). Wrap in transaction.
-    return await db.transaction(async (trx) => {
-        // Find organizations where this user is owner
+    // Safe deletion: schedule a hard delete for the user after a grace period and soft-delete the account now.
+    // This preserves the ability to restore the account if the user signs in again within the grace period.
+    const days = Number(process.env.USER_DELETION_GRACE_DAYS || 30);
+    // Use DB function to compute timestamp in future (MySQL DATE_ADD). If not MySQL, environment should set appropriate behavior.
+    const scheduledAt = db.raw("DATE_ADD(NOW(), INTERVAL ? DAY)", [days]);
+
+    await db.transaction(async (trx) => {
+        // Perform ownership transfer similar to prior behavior: if another admin exists, promote them; otherwise soft-delete the org and schedule its deletion
         const ownerRows = await trx('organization_memberships').where({ user_id: userId, role: 'owner' }).select('organization_id');
 
         for (const row of ownerRows) {
             const orgId = row.organization_id;
-            // Try to find another admin in the organization
             const newOwner = await trx('organization_memberships')
                 .where({ organization_id: orgId, role: 'admin' })
                 .andWhere('user_id', '<>', userId)
@@ -59,24 +125,23 @@ export async function deleteUserData(userId) {
                 .first();
 
             if (newOwner && newOwner.id) {
-                // promote this admin to owner
                 await trx('organization_memberships').where({ id: newOwner.id }).update({ role: 'owner' });
-                // audit: record promotion (strict within trx)
                 await auditService.writeAudit({ entityType: 'membership', entityId: newOwner.id, action: 'owner_promoted', details: { organization_id: orgId, promoted_user_id: newOwner.user_id }, performedBy: userId }, trx);
             } else {
-                // No admin found — soft-delete the organization by setting deleted_at
+                // No admin found — soft-delete the organization and schedule hard deletion
                 try {
-                    await trx('organizations').where({ id: orgId }).update({ deleted_at: trx.fn.now(), deleted_by: userId });
-                    await auditService.writeAudit({ entityType: 'organization', entityId: orgId, action: 'organization_soft_deleted', details: { reason: 'owner_deleted_no_admin' }, performedBy: userId }, trx);
+                    await trx('organizations').where({ id: orgId }).update({ deleted_at: trx.fn.now(), deleted_by: userId, deletion_scheduled_at: scheduledAt });
+                    await auditService.writeAudit({ entityType: 'organization', entityId: orgId, action: 'organization_soft_deleted', details: { reason: 'owner_deleted_no_admin', scheduled_days: days }, performedBy: userId }, trx);
                 } catch (e) {
                     // fallback to hard delete if update fails for any reason — use service helper to remove all library data
-                    try {
-                        await orgsService.hardDeleteOrganization(orgId, trx);
-                        // audit for hard delete is written by hardDeleteOrganization
-                    } catch (innerErr) {
-                        // if even the service helper fails, rethrow to abort the transaction
-                        throw innerErr;
-                    }
+                        try {
+                            // Ensure we pass performedBy (null) and the transaction as the third argument
+                            // so the hard delete runs inside the current transaction and audit logs record the
+                            // correct performer (null in this fallback case).
+                            await orgsService.hardDeleteOrganization(orgId, null, trx);
+                        } catch (innerErr) {
+                            throw innerErr;
+                        }
                 }
             }
         }
@@ -90,11 +155,15 @@ export async function deleteUserData(userId) {
         try { await trx('refresh_tokens').where({ user_id: userId }).del(); } catch (e) { /* ignore */ }
         try { await trx('oauth_states').where({ user_id: userId }).del(); } catch (e) { /* ignore */ }
 
-        // Finally soft-delete the user record
-        // soft-delete user (strict within trx)
-        await trx('users').where({ id: userId }).update({ deleted_at: trx.fn.now() });
-        await auditService.writeAudit({ entityType: 'user', entityId: userId, action: 'user_soft_deleted', details: null, performedBy: userId }, trx);
+        // Finally soft-delete the user record and set deletion_scheduled_at
+        await trx('users').where({ id: userId }).update({ deleted_at: trx.fn.now(), deletion_scheduled_at: scheduledAt });
+        await auditService.writeAudit({ entityType: 'user', entityId: userId, action: 'user_soft_deleted', details: { scheduled_days: days }, performedBy: userId }, trx);
     });
+}
+
+export async function scheduleUserHardDelete(userId, when, performedBy = null) {
+    await db('users').where({ id: userId }).update({ deletion_scheduled_at: when });
+    try { await auditService.writeAudit({ entityType: 'user', entityId: userId, action: 'user_deletion_scheduled', details: { when }, performedBy: performedBy || null }); } catch (e) {}
 }
 
 export async function restoreUser(userId) {
@@ -163,10 +232,29 @@ export async function getUserLibraries(userId) {
     return libraries;
 }
 
-// find a user by email (used by invitation flow)
-export async function getUserByEmail(email) {
-    if (!email) return null;
-    const user = await db('users').where({ email }).first();
+// find a user by username#discriminator or username
+export async function getUserByHandle(handle) {
+    if (!handle) return null;
+    // accept either 'username#1234' or { username, discriminator }
+    if (typeof handle === 'string') {
+        let username = handle;
+        let discriminator = null;
+        if (handle.includes('#')) {
+            const parts = handle.split('#');
+            username = parts[0];
+            discriminator = parts[1];
+        }
+        const query = db('users').whereRaw('LOWER(username) = LOWER(?)', [username]);
+        if (discriminator) query.andWhere({ discriminator });
+        const user = await query.first();
+        return user || null;
+    }
+    // if passed an object
+    const { username, discriminator } = handle || {};
+    if (!username) return null;
+    const query = db('users').whereRaw('LOWER(username) = LOWER(?)', [username]);
+    if (discriminator) query.andWhere({ discriminator });
+    const user = await query.first();
     return user || null;
 }
 

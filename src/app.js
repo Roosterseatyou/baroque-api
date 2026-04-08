@@ -9,16 +9,23 @@ import librariesRoutes from "./routes/libraries.routes.js";
 import piecesRoutes from "./routes/pieces.routes.js";
 import scrapeRoutes from "./routes/scrape.routes.js";
 import googleRoutes from "./routes/google.routes.js";
+import invitationsRoutes from "./routes/invitations.routes.js";
 import db from './config/knex.js';
 
 const app = express();
 
-// Allow frontend origin and api origin
-const allowedOrigins = [process.env.FRONTEND_ORIGIN, process.env.API_ORIGIN].filter(Boolean);
-app.use(cors({
-    origin: allowedOrigins,
-    credentials: true
-}));
+// Allow frontend origin and api origin. Default FRONTEND_ORIGIN to local dev host when not set
+// so that local frontend (vite at :5173) can receive HttpOnly cookies during development.
+const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || 'http://localhost:5173';
+const allowedOrigins = [FRONTEND_ORIGIN, process.env.API_ORIGIN].filter(Boolean);
+
+// In development allow any origin so the browser will accept cookies from the server when
+// the frontend is served from localhost:5173 (Vite). In production use a restricted list.
+if (process.env.NODE_ENV !== 'production') {
+    app.use(cors({ origin: true, credentials: true }));
+} else {
+    app.use(cors({ origin: allowedOrigins, credentials: true }));
+}
 
 app.use(cookieParser());
 // Allow configuring the maximum request body size via env var. Defaults to 1mb which
@@ -49,6 +56,7 @@ app.use('/organizations', orgsRoutes);
 app.use('/libraries', librariesRoutes);
 app.use('/pieces', piecesRoutes);
 app.use('/scrape', scrapeRoutes);
+app.use('/invitations', invitationsRoutes);
 // Mount integrations routes only when explicitly enabled. The frontend login/signup
 // flow uses the auth routes (`/auth/google`), so by default we keep integrations
 // disabled to avoid confusion now that Drive/Sheets integrations were removed.

@@ -20,8 +20,8 @@ export async function me(req, res) {
 
 export async function updateUserProfile(req, res) {
     try {
-        const { name, email } = req.body;
-        const updatedUser = await usersService.updateUserProfile(req.user.id, { name, email });
+        const { name, username, discriminator, email } = req.body;
+        const updatedUser = await usersService.updateUserProfile(req.user.id, { name, username, discriminator, email });
         res.status(200).json(updatedUser);
     } catch (error) {
         res.status(400).json({ error: error.message });

@@ -63,7 +63,7 @@ export async function getOrganizationMembers(organizationId) {
     const members = await db('organization_memberships')
         .join('users', 'organization_memberships.user_id', 'users.id')
         .where('organization_memberships.organization_id', organizationId)
-        .select('users.id', 'users.name', 'users.email', 'organization_memberships.role as membership_role');
+        .select('users.id', 'users.name', 'users.username', 'users.discriminator', 'organization_memberships.role as membership_role');
     return members;
 }
 
@@ -80,6 +80,16 @@ export async function removeMemberFromOrganization({ organizationId, userId }) {
     await db('organization_memberships')
         .where({ organization_id: organizationId, user_id: userId })
         .del();
+}
+
+export async function updateMemberRole({ organizationId, userId, role }) {
+    // validate role
+    const allowed = ['viewer','editor','admin','owner','manager'];
+    if (!allowed.includes(role)) throw new Error('Invalid role');
+    await db('organization_memberships').where({ organization_id: organizationId, user_id: userId }).update({ role, updated_at: db.fn.now() });
+    const row = await db('organization_memberships').where({ organization_id: organizationId, user_id: userId }).first();
+    if (!row) throw new Error('Membership not found');
+    return { id: row.id, organization_id: row.organization_id, user_id: row.user_id, role: row.role };
 }
 
 export async function updateOrganization(organizationId, { name }) {
@@ -105,12 +115,21 @@ export async function deleteOrganization(organizationId, performedBy = null) {
     // fetch existing org name for audit details
     const org = await db('organizations').where({ id: organizationId }).first();
     const orgName = org ? org.name : null;
+    // schedule deletion: soft-delete now and set deletion_scheduled_at to 30 days in future (configurable via env)
+    const days = Number(process.env.ORGANIZATION_DELETION_GRACE_DAYS || 30);
+    const scheduledAt = db.raw("DATE_ADD(NOW(), INTERVAL ? DAY)", [days]);
 
     await db('organizations')
         .where({ id: organizationId })
-        .update({ deleted_at: db.fn.now(), updated_at: db.fn.now(), deleted_by: performedBy || null });
-    // record audit entry for soft-delete, include performing user and org name if available
-    await import('./audit.service.js').then(a => a.writeAudit({ entityType: 'organization', entityId: organizationId, action: 'organization_soft_deleted', details: orgName ? { name: orgName } : null, performedBy: performedBy || null }));
+        .update({ deleted_at: db.fn.now(), updated_at: db.fn.now(), deleted_by: performedBy || null, deletion_scheduled_at: scheduledAt });
+    // record audit entry for soft-delete and scheduling, include performing user and org name if available
+    await import('./audit.service.js').then(a => a.writeAudit({ entityType: 'organization', entityId: organizationId, action: 'organization_soft_deleted', details: orgName ? { name: orgName, scheduled_days: days } : { scheduled_days: days }, performedBy: performedBy || null }));
+}
+
+export async function scheduleOrganizationHardDelete(organizationId, when, performedBy = null) {
+    // helper to directly set deletion_scheduled_at to specific timestamp (when should be a JS Date or ISO string)
+    await db('organizations').where({ id: organizationId }).update({ deletion_scheduled_at: when });
+    try { await import('./audit.service.js').then(a => a.writeAudit({ entityType: 'organization', entityId: organizationId, action: 'organization_deletion_scheduled', details: { when }, performedBy: performedBy || null })); } catch (e) {}
 }
 
 export async function restoreOrganization(organizationId) {

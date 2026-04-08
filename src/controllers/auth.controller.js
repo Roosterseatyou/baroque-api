@@ -10,8 +10,10 @@ const IS_PROD = process.env.NODE_ENV === 'production'
 // cross-site OAuth redirect from Google. Browsers require Secure when SameSite=None.
 const REFRESH_COOKIE_OPTIONS = {
     httpOnly: true,
+    // secure in production only; in local dev we keep secure=false so localhost HTTP works
     secure: IS_PROD,
-    sameSite: IS_PROD ? 'none' : 'lax',
+    // Require SameSite=None so the refresh cookie will be included on cross-site POSTs (SPA XHR)
+    sameSite: 'none',
     // use root path so the browser includes the cookie for /auth/refresh
     path: '/',
     // maxAge not set here; the token has its own expiry in DB
@@ -33,12 +35,13 @@ const OAUTH_STATE_OPTIONS = {
 function buildRefreshCookieOptions(frontendOrigin) {
     const isLocal = frontendOrigin && (frontendOrigin.includes('localhost') || frontendOrigin.includes('127.0.0.1')) || process.env.NODE_ENV !== 'production';
     const opts = Object.assign({}, REFRESH_COOKIE_OPTIONS);
+    // For local development use SameSite='lax' and secure=false so browsers accept Set-Cookie
+    // from localhost:3000 when the frontend is at localhost:5173.
     if (isLocal) {
-        // local development - allow non-secure and SameSite=lax so browsers will accept the cookie
         opts.sameSite = 'lax';
         opts.secure = false;
     } else {
-        // production - require cross-site cookie support
+        // In production require cross-site cookie support
         opts.sameSite = 'none';
         opts.secure = true;
     }
@@ -47,9 +50,10 @@ function buildRefreshCookieOptions(frontendOrigin) {
 
 export async function register(req, res) {
     try {
-        const { email, name, password } = req.body;
-        const user = await authService.registerUser({ email, name, password });
-        res.status(201).json(user);
+        const { username, name, password, email } = req.body;
+        const user = await authService.registerUser({ username, name, password, email });
+        // return minimal user (include email if present)
+        res.status(201).json({ id: user.id, username: user.username, name: user.name, email: user.email || null });
     } catch (error) {
         res.status(400).json({ error: error.message });
     }
@@ -68,7 +72,8 @@ export async function login(req, res) {
         }
         res.cookie(REFRESH_COOKIE_NAME, refreshToken, cookieOpts);
         // Include a 'restored' flag if the login process restored a soft-deleted user
-        const resp = { token, refresh_expires_at, user };
+        const respUser = { id: user.id, username: user.username, discriminator: user.discriminator, name: user.name, avatar_url: user.avatar_url };
+        const resp = { token, refresh_expires_at, user: { ...respUser, email: user.email || null } };
         if (typeof user?.restored !== 'undefined') resp.restored = user.restored === true;
         res.status(200).json(resp);
     } catch (error) {
@@ -91,7 +96,7 @@ export async function refresh(req, res) {
         }
         res.cookie(REFRESH_COOKIE_NAME, result.refreshToken, cookieOpts);
         // Include a 'restored' flag when refresh restored a soft-deleted user
-        const respUser = { id: result.user.id, email: result.user.email, name: result.user.name, avatar_url: result.user.avatar_url };
+        const respUser = { id: result.user.id, username: result.user.username, discriminator: result.user.discriminator, name: result.user.name, avatar_url: result.user.avatar_url, email: result.user.email || null };
         const resp = { token: result.accessToken, user: respUser };
         if (result.restored === true || result.user?.restored === true) resp.restored = true;
         res.status(200).json(resp);

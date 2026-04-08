@@ -1,5 +1,4 @@
 import * as orgsService from '../services/orgs.service.js';
-import * as usersService from '../services/users.service.js';
 
 export async function createOrganization(req, res) {
     try {
@@ -37,28 +36,35 @@ export async function getOrganization(req, res) {
 
 export async function addMember(req, res) {
     try {
-        const { userId, email, role } = req.body;
-        let targetUserId = userId;
-        if (!targetUserId && email) {
-            const user = await usersService.getUserByEmail(email.trim().toLowerCase());
-            if (!user) return res.status(404).json({ error: 'User not found for provided email' });
-            targetUserId = user.id;
+        const { userId, username, role } = req.body;
+        // If a direct userId is provided and caller wants immediate add, honor it
+        if (userId) {
+                    // Direct add path: require an elevated requester role (owner/admin/manager).
+                    // Default role for the new member
+                    const inviteRole = role || 'viewer'
+
+                    const requesterId = req.user && req.user.id
+                    const requesterMembership = await orgsService.getMembershipForUser(req.params.organizationId, requesterId)
+                    if (!requesterMembership || !['owner','admin','manager'].includes(requesterMembership.role)) {
+                        return res.status(403).json({ error: 'Forbidden' })
+                    }
+
+                    // Admins cannot add an owner
+                    if (requesterMembership.role === 'admin' && inviteRole === 'owner') {
+                        return res.status(403).json({ error: 'Admins cannot assign owner role' })
+                    }
+
+                    const existing = await orgsService.getMembershipForUser(req.params.organizationId, userId);
+                    if (existing) return res.status(409).json({ error: 'User is already a member of this organization' });
+                    const membership = await orgsService.addMemberToOrganization({ organizationId: req.params.organizationId, userId, role: inviteRole });
+                    return res.status(201).json(membership);
         }
-        if (!targetUserId) return res.status(400).json({ error: 'userId or email required' });
 
-        // default role to 'viewer' if not provided
-        const inviteRole = role || 'viewer'
-
-        // avoid duplicate membership
-        const existing = await orgsService.getMembershipForUser(req.params.organizationId, targetUserId);
-        if (existing) return res.status(409).json({ error: 'User is already a member of this organization' });
-
-        const membership = await orgsService.addMemberToOrganization({
-            organizationId: req.params.organizationId,
-            userId: targetUserId,
-            role: inviteRole
-        });
-        res.status(201).json(membership);
+        // Otherwise create an invitation record so the target user can accept/decline
+        if (!username) return res.status(400).json({ error: 'username required to invite' });
+        const invitationsController = await import('./invitations.controller.js');
+        // delegate to invitations controller createInvite which will resolve user if possible
+        return invitationsController.createInvite(req, res);
     } catch (error) {
         res.status(400).json({ error: error.message });
     }
@@ -76,11 +82,68 @@ export async function getMembers(req, res) {
 export async function removeMember(req, res) {
     try {
         const { userId } = req.body;
-        await orgsService.removeMemberFromOrganization({
-            organizationId: req.params.organizationId,
-            userId
-        });
+        const requesterId = req.user && req.user.id;
+        if (!userId) return res.status(400).json({ error: 'userId required' });
+
+        // load memberships for requester and target
+        const requesterMembership = await orgsService.getMembershipForUser(req.params.organizationId, requesterId);
+        const targetMembership = await orgsService.getMembershipForUser(req.params.organizationId, userId);
+        if (!targetMembership) return res.status(404).json({ error: 'User is not a member' });
+
+        // allow self-removal
+        if (String(requesterId) === String(userId)) {
+            await orgsService.removeMemberFromOrganization({ organizationId: req.params.organizationId, userId });
+            return res.status(204).send();
+        }
+
+        // require requester to have membership with role owner or admin
+        if (!requesterMembership || !['owner', 'admin'].includes(requesterMembership.role)) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
+
+        // admin cannot remove an owner
+        if (requesterMembership.role === 'admin' && targetMembership.role === 'owner') {
+            return res.status(403).json({ error: 'Admins cannot remove owners' });
+        }
+
+        // perform removal
+        await orgsService.removeMemberFromOrganization({ organizationId: req.params.organizationId, userId });
         res.status(204).send();
+    } catch (error) {
+        res.status(400).json({ error: error.message });
+    }
+}
+
+export async function updateMemberRole(req, res) {
+    try {
+        const { userId } = req.params; // target user id from URL
+        const { role } = req.body;
+        const requesterId = req.user && req.user.id;
+        if (!role) return res.status(400).json({ error: 'role required' });
+
+        const requesterMembership = await orgsService.getMembershipForUser(req.params.organizationId, requesterId);
+        const targetMembership = await orgsService.getMembershipForUser(req.params.organizationId, userId);
+        if (!targetMembership) return res.status(404).json({ error: 'User is not a member' });
+
+        // Disallow changing own role via this endpoint
+        if (String(requesterId) === String(userId)) return res.status(400).json({ error: 'Cannot change your own role' });
+
+        // Only owner or admin can change roles
+        if (!requesterMembership || !['owner', 'admin'].includes(requesterMembership.role)) return res.status(403).json({ error: 'Forbidden' });
+
+        // Admins cannot change the role of an owner
+        if (requesterMembership.role === 'admin' && targetMembership.role === 'owner') {
+            return res.status(403).json({ error: 'Admins cannot modify owners' });
+        }
+
+        // Admins cannot promote someone to owner
+        if (requesterMembership.role === 'admin' && role === 'owner') {
+            return res.status(403).json({ error: 'Admins cannot promote to owner' });
+        }
+
+        // perform update
+        await orgsService.updateMemberRole({ organizationId: req.params.organizationId, userId, role });
+        res.status(200).json({ success: true });
     } catch (error) {
         res.status(400).json({ error: error.message });
     }
@@ -90,7 +153,7 @@ export async function updateOrganization(req, res) {
     try {
         const { name, allow_sharing } = req.body;
         // only allow updating allow_sharing if caller has permission (membership check is above in route)
-        const updatedOrganization = await orgsService.updateOrganization(req.params.organizationId, { name });
+        await orgsService.updateOrganization(req.params.organizationId, { name });
         // update settings separately so we don't mix signature with existing function
         if (typeof allow_sharing !== 'undefined') {
             // require an elevated membership
