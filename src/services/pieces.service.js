@@ -88,7 +88,10 @@ export async function getPieces(libraryId) {
 // New: paginated fetch for pieces. Returns { pieces, total }
 export async function getPiecesPaged(libraryId, { page = 1, perPage = 20, sortField = 'title', sortDir = 'asc' } = {}) {
     const p = Math.max(1, Number(page) || 1)
-    const pp = Math.max(1, Number(perPage) || 20)
+    // enforce a maximum per-page to avoid very large responses / expensive queries
+    const PIECES_MAX_PER_PAGE = Number(process.env.PIECES_MAX_PER_PAGE || 200)
+    const ppRaw = Number(perPage) || 20
+    const pp = Math.max(1, Math.min(ppRaw, PIECES_MAX_PER_PAGE))
     const offset = (p - 1) * pp
 
     // get total count
@@ -96,7 +99,11 @@ export async function getPiecesPaged(libraryId, { page = 1, perPage = 20, sortFi
     const total = Number(count || 0)
 
     // fetch paged rows with ordering
-    const orderField = (sortField || 'title')
+    // Whitelist allowed sort fields to avoid SQL errors or unintended column access
+    const allowedSortFields = ['title', 'composer', 'library_number', 'created_at', 'instrumentation', 'quantity']
+    const defaultSort = 'title'
+    const sf = String(sortField || defaultSort).toLowerCase()
+    const orderField = allowedSortFields.includes(sf) ? sf : defaultSort
     const dir = (String(sortDir || 'asc').toLowerCase() === 'desc') ? 'desc' : 'asc'
 
     const rows = await db('pieces').where({ library_id: libraryId }).orderBy(orderField, dir).limit(pp).offset(offset)

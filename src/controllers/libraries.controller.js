@@ -148,15 +148,18 @@ function _serverNormalizePayload(payload, opts = {}) {
     }
 
     // Apply pagination: opts.perPage / opts.page
-    const perPage = Number(opts.perPage || opts.per_page) || 50;
+    const requestedPerPage = Number(opts.perPage || opts.per_page) || 50;
     const page = Math.max(1, Number(opts.page) || 1);
+    // Cap perPage to MAX_GROUPS so pagination metadata remains consistent with returned groups
+    const perPage = Math.max(1, Math.min(requestedPerPage, MAX_GROUPS));
     const totalPages = Math.max(1, Math.ceil(total / perPage));
 
     const start = (page - 1) * perPage;
     const end = start + perPage;
     const pageSlice = combined.slice(start, end);
     const truncated = total > perPage;
-    out.groups = pageSlice.slice(0, MAX_GROUPS);
+    // pageSlice length will be <= perPage and perPage <= MAX_GROUPS, so no extra slicing needed
+    out.groups = pageSlice;
     out.cachedAt = payload.cachedAt || payload.cached_at || null;
     out.scanning = !!payload.scanning;
     if (truncated) out.truncated = true;
@@ -195,6 +198,23 @@ function _cleanupImportCache() {
 
 // schedule periodic cleanup (low-frequency)
 setInterval(_cleanupImportCache, IMPORT_CACHE_TTL_MS);
+
+// Periodic cleanup for recent duplicate-log timestamps to avoid unbounded Map growth.
+// Entries older than DUP_LOG_TTL_MS will be evicted. This mirrors the import cache
+// cleanup behavior and runs at low frequency to avoid overhead.
+function _cleanupRecentDupLogAt() {
+    const now = Date.now();
+    for (const [k, v] of _recentDupLogAt.entries()) {
+        try {
+            if (now - (v || 0) > DUP_LOG_TTL_MS) _recentDupLogAt.delete(k);
+        } catch (e) {
+            // swallow to avoid crashing periodic cleanup
+        }
+    }
+}
+
+// Run cleanup at the same cadence as the TTL (low frequency)
+setInterval(_cleanupRecentDupLogAt, DUP_LOG_TTL_MS);
 
 export async function createLibrary(req, res) {
     try {

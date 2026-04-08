@@ -32,13 +32,16 @@ export async function scheduleScan(libraryId) {
 
 // Process pending jobs. This should be run by a background worker (or periodically from server startup).
 export async function processPendingJobs({ limit = 5 } = {}) {
+  // maximum attempts before marking a job as permanently failed
+  const MAX_ATTEMPTS = Number(process.env.DUP_MAX_ATTEMPTS || 3);
+
   // Recover stale 'running' jobs that might have been left by a timed-out worker
   try {
     const WORKER_TIMEOUT_MS = Number(process.env.DUP_WORKER_TIMEOUT_MS || 5 * 60 * 1000);
     const staleCutoff = new Date(Date.now() - WORKER_TIMEOUT_MS - 60000); // extra 60s buffer
     const staleRunning = await db('duplicate_scan_jobs').where({ status: 'running' }).andWhere('started_at', '<', staleCutoff).select();
     for (const r of staleRunning) {
-      const attemptsNow = (r.attempts || 0);
+      const attemptsNow = Number(r.attempts || 0);
       if (attemptsNow >= MAX_ATTEMPTS) {
         try {
           await db('duplicate_scan_jobs').where({ id: r.id }).update({ status: 'failed', last_error: 'stale-running-exceeded-attempts', updated_at: db.fn.now() });
@@ -61,12 +64,10 @@ export async function processPendingJobs({ limit = 5 } = {}) {
     .orderBy('created_at', 'asc')
     .limit(limit);
 
-  // maximum attempts before marking a job as permanently failed
-  const MAX_ATTEMPTS = Number(process.env.DUP_MAX_ATTEMPTS || 3);
 
   for (const j of jobs) {
     // mark as running and increment attempts (attempt count represents attempts started)
-    await db('duplicate_scan_jobs').where({ id: j.id, status: 'pending' }).update({ status: 'running', started_at: db.fn.now(), attempts: j.attempts + 1, updated_at: db.fn.now() });
+    await db('duplicate_scan_jobs').where({ id: j.id, status: 'pending' }).update({ status: 'running', started_at: db.fn.now(), attempts: Number(j.attempts || 0) + 1, updated_at: db.fn.now() });
     try {
       // Use worker_threads if available to avoid blocking main thread when run inline
       let groups;
@@ -86,10 +87,21 @@ export async function processPendingJobs({ limit = 5 } = {}) {
           let timer = setTimeout(() => {
             // try to terminate the worker and reject with timeout
             try { w.terminate(); } catch (e) { /* ignore */ }
+            // prevent any later handlers from running and clean up resources
+            settled = true;
+            try { cleanUp(); } catch (e) { /* ignore cleanup errors */ }
             reject(new Error('Worker timed out'));
           }, timeout);
           let settled = false;
-          const cleanUp = () => { if (timer) { clearTimeout(timer); timer = null } };
+          const cleanUp = () => {
+            try {
+              if (timer) { clearTimeout(timer); timer = null }
+            } catch (e) { /* ignore */ }
+            // remove listeners to avoid them firing after we've already settled
+            try { w.removeAllListeners && w.removeAllListeners('message'); } catch (e) { /* ignore */ }
+            try { w.removeAllListeners && w.removeAllListeners('error'); } catch (e) { /* ignore */ }
+            try { w.removeAllListeners && w.removeAllListeners('exit'); } catch (e) { /* ignore */ }
+          };
 
           w.on('message', (m) => {
             if (settled) return
@@ -120,7 +132,7 @@ export async function processPendingJobs({ limit = 5 } = {}) {
     } catch (err) {
       console.error('Failed processing duplicate scan job', j.id, err);
       // If the job has attempts remaining, requeue it as 'pending' to retry later.
-      const attemptsNow = (j.attempts || 0) + 1;
+      const attemptsNow = Number(j.attempts || 0) + 1;
       const lastError = String(err && err.message ? err.message : err);
       if (attemptsNow < MAX_ATTEMPTS) {
         // Requeue for another attempt
