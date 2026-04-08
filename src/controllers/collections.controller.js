@@ -13,6 +13,13 @@ export async function listCollections(req, res) {
     } else {
       rows = await collectionsService.getCollectionsForLibrary(libraryId);
     }
+    // Ensure rows are JSON-serializable and log helpful details on failure
+    try {
+      JSON.stringify(rows);
+    } catch (serr) {
+      console.error('Failed to serialize collections response', serr, { libraryId, sampleRow: rows && rows[0] });
+      return res.status(500).json({ error: 'Failed to serialize collections response' });
+    }
     res.status(200).json(rows);
   } catch (e) {
     res.status(500).json({ error: e.message });

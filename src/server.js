@@ -2,6 +2,7 @@ import app from "./app.js";
 import knex from "./config/knex.js";
 import dotenv from "dotenv";
 import * as dupQueue from './services/dupQueue.service.js';
+import { runFixCollectionsMetadata } from '../scripts/fix_collections_metadata.js';
 
 dotenv.config();
 
@@ -111,6 +112,19 @@ async function migrateWithRetry({ maxAttempts = 30, initialDelayMs = 2000 } = {}
 
 async function init() {
   try {
+    // Optionally run maintenance scripts before startup if requested
+    const RUN_SCRIPTS = String(process.env.RUN_SCRIPTS || '').toLowerCase() === 'true';
+    if (RUN_SCRIPTS) {
+      console.log('RUN_SCRIPTS=true — running maintenance scripts before startup');
+      try {
+        await runFixCollectionsMetadata();
+        console.log('Maintenance scripts completed successfully');
+      } catch (e) {
+        console.error('Maintenance scripts failed:', e);
+        // Fail fast: do not start the server if the scripts were requested but failed
+        process.exit(1);
+      }
+    }
     if (SKIP_MIGRATIONS) {
         console.log('SKIP_MIGRATIONS=true — skipping database migrations at startup');
     } else {
