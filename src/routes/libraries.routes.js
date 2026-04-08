@@ -3,6 +3,7 @@ import * as librariesController from '../controllers/libraries.controller.js';
 import * as tagsController from '../controllers/tags.controller.js';
 import { requireOrgRole, requireLibraryRole, requireOrgOrLibraryRole } from "../middleware/role.middleware.js";
 import { authenticate } from "../middleware/auth.middleware.js";
+import collectionsRoutes from './collections.routes.js'
 
 const router = express.Router();
 
@@ -38,4 +39,8 @@ router.get('/public/:token/duplicates', librariesController.findLibraryDuplicate
 router.post('/:libraryId/view-token', authenticate, requireOrgOrLibraryRole(['owner','admin']), librariesController.generateViewToken);
 router.delete('/:libraryId/view-token', authenticate, requireOrgOrLibraryRole(['owner','admin']), librariesController.revokeViewToken);
 
+// mount collections routes
+router.use('/:libraryId/collections', collectionsRoutes);
+
 export default router;
+

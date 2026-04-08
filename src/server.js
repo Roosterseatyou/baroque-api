@@ -119,7 +119,8 @@ async function init() {
         } catch (mErr) {
             console.error('Migrations failed after retries:', mErr && mErr.message ? mErr.message : mErr);
             if (!START_WITHOUT_DB) {
-                // If we require DB, exit with failure
+                // If we require DB, exit with failure and print full stack
+                console.error('Migrations failed after startup:', mErr);
                 throw new Error(mErr && mErr.message ? mErr.message : String(mErr));
             }
             console.warn('START_WITHOUT_DB=true — continuing startup despite failed migrations');
@@ -133,8 +134,9 @@ async function init() {
     // Background poller for duplicate scan jobs can be run inline in this process
     // but CPU-heavy scans should run in a separate worker process to avoid
     // blocking the main HTTP server. To enable inline polling set RUN_DUP_QUEUE_INLINE=true
-    const RUN_INLINE = String(process.env.RUN_DUP_QUEUE_INLINE || '').toLowerCase() === 'true';
-    if (RUN_INLINE) {
+    const RUN_DUP_INLINE = String(process.env.RUN_DUP_QUEUE_INLINE || '').toLowerCase() === 'true';
+
+    if (RUN_DUP_INLINE) {
       console.log('Starting inline duplicate-scan poller (RUN_DUP_QUEUE_INLINE=true)');
       const POLL_INTERVAL_MS = Number(process.env.DUP_QUEUE_POLL_MS || 30000);
       const DUP_QUEUE_LIMIT = Number(process.env.DUP_QUEUE_LIMIT || 5);
@@ -151,6 +153,20 @@ async function init() {
       process.on('SIGTERM', () => { if (poller) clearInterval(poller); });
     } else {
       console.log('Duplicate-scan poller not started in-process. Run `npm run worker` to start the separate worker.');
+    }
+    const RUN_DELETE_INLINE = String(process.env.RUN_DELETION_INLINE || '').toLowerCase() === 'true';
+    if(RUN_DELETE_INLINE) {
+        const POLL_INTERVAL_MS = Number(process.env.DELETION_WORKER_POLL_MS || 30000);
+        import('./worker/deletionWorker.js').then(worker => {
+            // start inline without destroying the shared knex pool on stop
+            const stop = worker.start({ pollIntervalMs: POLL_INTERVAL_MS, destroyPoolOnStop: false });
+            process.on('SIGINT', stop);
+            process.on('SIGTERM', stop);
+        }).catch(err => {
+            console.error('Error starting deletion worker inline:', err);
+        })
+    } else {
+        console.log('Deletion worker not started in-process. Run `npm run deletion-worker` to start the separate worker.');
     }
     const shutdown = async () => {
         console.log("Shutting down server...");

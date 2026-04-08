@@ -13,6 +13,15 @@ export async function createPiece({ libraryId, data }) {
         else publisherValue = String(data.publisher)
     }
 
+    // If collection_id provided, validate it belongs to the same library
+    let collectionIdToStore = null;
+    if (data.collection_id) {
+        const col = await db('collections').where({ id: data.collection_id }).first();
+        if (!col) throw new Error('Invalid collection_id');
+        if (String(col.library_id) !== String(libraryId)) throw new Error('collection does not belong to library');
+        collectionIdToStore = data.collection_id;
+    }
+
     await db('pieces').insert({
         id: pieceId,
         library_id: libraryId,
@@ -22,11 +31,13 @@ export async function createPiece({ libraryId, data }) {
         publisher: publisherValue,
         quantity: Number.isFinite(Number(data.quantity)) ? Number(data.quantity) : 1,
         library_number: data.library_number || null,
+        collection_id: collectionIdToStore,
         difficulty: data.difficulty || null,
         instrumentation: data.instrumentation || null,
         metadata: JSON.stringify(data.metadata || {})
     });
-    return { id: pieceId, library_id: libraryId, library_number: data.library_number || null, quantity: Number.isFinite(Number(data.quantity)) ? Number(data.quantity) : 1, ...data };
+    // return a normalized piece object including collection info when available
+    return await getPieceById(pieceId);
 }
 
 export async function getPieceById(pieceId) {
@@ -38,6 +49,14 @@ export async function getPieceById(pieceId) {
         .select('tags.id','tags.name');
     // normalize quantity to number for API consumers
     piece.quantity = piece.quantity != null ? Number(piece.quantity) : 1;
+    // include collection data when present
+    if (piece.collection_id) {
+        const col = await db('collections').where({ id: piece.collection_id }).first();
+        if (col) piece.collection = { id: col.id, name: col.name, library_number: col.library_number };
+        else piece.collection = null;
+    } else {
+        piece.collection = null;
+    }
     return piece;
 }
 
@@ -55,7 +74,14 @@ export async function getPieces(libraryId) {
         tagsByPiece[row.piece_id] = tagsByPiece[row.piece_id] || [];
         tagsByPiece[row.piece_id].push({ id: row.id, name: row.name });
     }
-    return pieces.map(p => ({ ...p, tags: tagsByPiece[p.id] || [], quantity: p.quantity != null ? Number(p.quantity) : 1 }));
+    // fetch collections referenced by these pieces
+    const collectionIds = [...new Set(pieces.map(p => p.collection_id).filter(Boolean))];
+    let collectionsById = {};
+    if (collectionIds.length) {
+        const cols = await db('collections').whereIn('id', collectionIds).select('id','name','library_number');
+        for (const c of cols) collectionsById[c.id] = c;
+    }
+    return pieces.map(p => ({ ...p, tags: tagsByPiece[p.id] || [], quantity: p.quantity != null ? Number(p.quantity) : 1, collection: p.collection_id ? (collectionsById[p.collection_id] || null) : null }));
 }
 
 export async function updatePiece(pieceId, data) {
@@ -67,20 +93,35 @@ export async function updatePiece(pieceId, data) {
         else publisherValue = String(data.publisher)
     }
 
-    await db('pieces')
-        .where({ id: pieceId })
-        .update({
-            title: data.title,
-            composer: data.composer,
-            arranger: data.arranger || null,
-            publisher: publisherValue,
-            quantity: Number.isFinite(Number(data.quantity)) ? Number(data.quantity) : 1,
-            library_number: data.library_number || null,
-            difficulty: data.difficulty || null,
-            instrumentation: data.instrumentation || null,
-            metadata: JSON.stringify(data.metadata || {}),
-            updated_at: db.fn.now()
-        });
+    // Validate collection_id if provided, and build update object conditionally
+    const existing = await db('pieces').where({ id: pieceId }).first();
+    if (!existing) throw new Error('Piece not found');
+
+    const update = {
+        title: data.title,
+        composer: data.composer,
+        arranger: data.arranger || null,
+        publisher: publisherValue,
+        quantity: Number.isFinite(Number(data.quantity)) ? Number(data.quantity) : 1,
+        library_number: data.library_number || null,
+        difficulty: data.difficulty || null,
+        instrumentation: data.instrumentation || null,
+        metadata: JSON.stringify(data.metadata || {}),
+        updated_at: db.fn.now()
+    };
+
+    if (typeof data.collection_id !== 'undefined') {
+        if (data.collection_id === null) {
+            update.collection_id = null;
+        } else {
+            const col = await db('collections').where({ id: data.collection_id }).first();
+            if (!col) throw new Error('Invalid collection_id');
+            if (String(col.library_id) !== String(existing.library_id)) throw new Error('collection does not belong to piece library');
+            update.collection_id = data.collection_id;
+        }
+    }
+
+    await db('pieces').where({ id: pieceId }).update(update);
     return await getPieceById(pieceId);
 }
 

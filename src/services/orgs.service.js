@@ -115,12 +115,21 @@ export async function deleteOrganization(organizationId, performedBy = null) {
     // fetch existing org name for audit details
     const org = await db('organizations').where({ id: organizationId }).first();
     const orgName = org ? org.name : null;
+    // schedule deletion: soft-delete now and set deletion_scheduled_at to 30 days in future (configurable via env)
+    const days = Number(process.env.ORGANIZATION_DELETION_GRACE_DAYS || 30);
+    const scheduledAt = db.raw("DATE_ADD(NOW(), INTERVAL ? DAY)", [days]);
 
     await db('organizations')
         .where({ id: organizationId })
-        .update({ deleted_at: db.fn.now(), updated_at: db.fn.now(), deleted_by: performedBy || null });
-    // record audit entry for soft-delete, include performing user and org name if available
-    await import('./audit.service.js').then(a => a.writeAudit({ entityType: 'organization', entityId: organizationId, action: 'organization_soft_deleted', details: orgName ? { name: orgName } : null, performedBy: performedBy || null }));
+        .update({ deleted_at: db.fn.now(), updated_at: db.fn.now(), deleted_by: performedBy || null, deletion_scheduled_at: scheduledAt });
+    // record audit entry for soft-delete and scheduling, include performing user and org name if available
+    await import('./audit.service.js').then(a => a.writeAudit({ entityType: 'organization', entityId: organizationId, action: 'organization_soft_deleted', details: orgName ? { name: orgName, scheduled_days: days } : { scheduled_days: days }, performedBy: performedBy || null }));
+}
+
+export async function scheduleOrganizationHardDelete(organizationId, when, performedBy = null) {
+    // helper to directly set deletion_scheduled_at to specific timestamp (when should be a JS Date or ISO string)
+    await db('organizations').where({ id: organizationId }).update({ deletion_scheduled_at: when });
+    try { await import('./audit.service.js').then(a => a.writeAudit({ entityType: 'organization', entityId: organizationId, action: 'organization_deletion_scheduled', details: { when }, performedBy: performedBy || null })); } catch (e) {}
 }
 
 export async function restoreOrganization(organizationId) {

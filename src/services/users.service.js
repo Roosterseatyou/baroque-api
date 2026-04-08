@@ -26,6 +26,17 @@ export async function updateUserProfile(userId, { name, username, discriminator 
     if (typeof name !== 'undefined') update.name = name;
     if (typeof username !== 'undefined') update.username = String(username).toLowerCase();
     if (typeof discriminator !== 'undefined') update.discriminator = discriminator;
+    if (typeof arguments[1] !== 'undefined' && arguments[1] && typeof arguments[1].email !== 'undefined') {
+        const email = arguments[1].email;
+        if (email) {
+            // ensure no other user has this email
+            const existing = await db('users').whereRaw('LOWER(email) = LOWER(?)', [String(email).toLowerCase()]).andWhereNot({ id: userId }).first();
+            if (existing) throw new Error('Email already in use');
+            update.email = String(email).toLowerCase();
+        } else {
+            update.email = null;
+        }
+    }
 
     if (Object.keys(update).length === 0) {
         return await getUserById(userId);
@@ -52,15 +63,18 @@ export async function createUserData(userId, { orgName } = {}) {
 }
 
 export async function deleteUserData(userId) {
-    // Safe deletion: transfer ownership of organizations the user owns to another admin if possible,
-    // otherwise delete the organization (cascade will remove related rows). Wrap in transaction.
-    return await db.transaction(async (trx) => {
-        // Find organizations where this user is owner
+    // Safe deletion: schedule a hard delete for the user after a grace period and soft-delete the account now.
+    // This preserves the ability to restore the account if the user signs in again within the grace period.
+    const days = Number(process.env.USER_DELETION_GRACE_DAYS || 30);
+    // Use DB function to compute timestamp in future (MySQL DATE_ADD). If not MySQL, environment should set appropriate behavior.
+    const scheduledAt = db.raw("DATE_ADD(NOW(), INTERVAL ? DAY)", [days]);
+
+    await db.transaction(async (trx) => {
+        // Perform ownership transfer similar to prior behavior: if another admin exists, promote them; otherwise soft-delete the org and schedule its deletion
         const ownerRows = await trx('organization_memberships').where({ user_id: userId, role: 'owner' }).select('organization_id');
 
         for (const row of ownerRows) {
             const orgId = row.organization_id;
-            // Try to find another admin in the organization
             const newOwner = await trx('organization_memberships')
                 .where({ organization_id: orgId, role: 'admin' })
                 .andWhere('user_id', '<>', userId)
@@ -68,22 +82,18 @@ export async function deleteUserData(userId) {
                 .first();
 
             if (newOwner && newOwner.id) {
-                // promote this admin to owner
                 await trx('organization_memberships').where({ id: newOwner.id }).update({ role: 'owner' });
-                // audit: record promotion (strict within trx)
                 await auditService.writeAudit({ entityType: 'membership', entityId: newOwner.id, action: 'owner_promoted', details: { organization_id: orgId, promoted_user_id: newOwner.user_id }, performedBy: userId }, trx);
             } else {
-                // No admin found — soft-delete the organization by setting deleted_at
+                // No admin found — soft-delete the organization and schedule hard deletion
                 try {
-                    await trx('organizations').where({ id: orgId }).update({ deleted_at: trx.fn.now(), deleted_by: userId });
-                    await auditService.writeAudit({ entityType: 'organization', entityId: orgId, action: 'organization_soft_deleted', details: { reason: 'owner_deleted_no_admin' }, performedBy: userId }, trx);
+                    await trx('organizations').where({ id: orgId }).update({ deleted_at: trx.fn.now(), deleted_by: userId, deletion_scheduled_at: scheduledAt });
+                    await auditService.writeAudit({ entityType: 'organization', entityId: orgId, action: 'organization_soft_deleted', details: { reason: 'owner_deleted_no_admin', scheduled_days: days }, performedBy: userId }, trx);
                 } catch (e) {
                     // fallback to hard delete if update fails for any reason — use service helper to remove all library data
                     try {
                         await orgsService.hardDeleteOrganization(orgId, trx);
-                        // audit for hard delete is written by hardDeleteOrganization
                     } catch (innerErr) {
-                        // if even the service helper fails, rethrow to abort the transaction
                         throw innerErr;
                     }
                 }
@@ -99,11 +109,15 @@ export async function deleteUserData(userId) {
         try { await trx('refresh_tokens').where({ user_id: userId }).del(); } catch (e) { /* ignore */ }
         try { await trx('oauth_states').where({ user_id: userId }).del(); } catch (e) { /* ignore */ }
 
-        // Finally soft-delete the user record
-        // soft-delete user (strict within trx)
-        await trx('users').where({ id: userId }).update({ deleted_at: trx.fn.now() });
-        await auditService.writeAudit({ entityType: 'user', entityId: userId, action: 'user_soft_deleted', details: null, performedBy: userId }, trx);
+        // Finally soft-delete the user record and set deletion_scheduled_at
+        await trx('users').where({ id: userId }).update({ deleted_at: trx.fn.now(), deletion_scheduled_at: scheduledAt });
+        await auditService.writeAudit({ entityType: 'user', entityId: userId, action: 'user_soft_deleted', details: { scheduled_days: days }, performedBy: userId }, trx);
     });
+}
+
+export async function scheduleUserHardDelete(userId, when, performedBy = null) {
+    await db('users').where({ id: userId }).update({ deletion_scheduled_at: when });
+    try { await auditService.writeAudit({ entityType: 'user', entityId: userId, action: 'user_deletion_scheduled', details: { when }, performedBy: performedBy || null }); } catch (e) {}
 }
 
 export async function restoreUser(userId) {

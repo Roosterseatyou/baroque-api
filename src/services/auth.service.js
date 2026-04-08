@@ -6,11 +6,19 @@ import {generateAccessToken} from '../utils/jwt.js';
 import crypto from 'crypto';
 import debug from '../utils/debug.js';
 
-export async function registerUser({ username, name, password }) {
+export async function registerUser({ username, name, password, email }) {
     const canonical = String(username || '').toLowerCase();
     const existingUser = await db('users').whereRaw('LOWER(username) = LOWER(?)', [canonical]).first();
     if (existingUser) {
         throw new Error('User already exists');
+    }
+
+    // If email provided, ensure uniqueness
+    if (email) {
+        const existingEmail = await db('users').whereRaw('LOWER(email) = LOWER(?)', [String(email).toLowerCase()]).first();
+        if (existingEmail) {
+            throw new Error('Email already in use');
+        }
     }
 
     const id = generateUUID();
@@ -22,9 +30,10 @@ export async function registerUser({ username, name, password }) {
         discriminator: '0000', // caller can override if desired
         name,
         password: hashedPassword,
+        email: email ? String(email).toLowerCase() : null
     });
 
-    return { id, username: canonical, name };
+    return { id, username: canonical, name, email: email ? String(email).toLowerCase() : null };
 }
 
 function generateRandomString(bytes = 24) {
@@ -112,7 +121,7 @@ export async function loginUser({ usernameWithDisc, password }, metadata = {}) {
 
     const refreshToken = await createRefreshTokenForUser(user.id, 30, metadata);
 
-    const safeUser = { id: effectiveUser.id, username: effectiveUser.username, discriminator: effectiveUser.discriminator, name: effectiveUser.name, avatar_url: effectiveUser.avatar_url };
+    const safeUser = { id: effectiveUser.id, username: effectiveUser.username, discriminator: effectiveUser.discriminator, name: effectiveUser.name, avatar_url: effectiveUser.avatar_url, email: effectiveUser.email || null };
     if (restored) safeUser.restored = true;
 
     return { token: accessToken, refreshToken: refreshToken.token, refresh_expires_at: refreshToken.expires_at, user: safeUser, restored };
@@ -173,7 +182,7 @@ export async function exchangeRefreshToken(cookieValue, rotate = true, metadata 
         // mark old token as revoked and delete it (we set revoked flag and then delete the row to avoid reuse)
         await db('refresh_tokens').where({ selector: parsed.selector }).update({ revoked: true, revoked_at: new Date(), revoked_reason: 'rotated' });
         await db('refresh_tokens').where({ selector: parsed.selector }).del();
-            const safeUser = { id: effectiveUser.id, username: effectiveUser.username, discriminator: effectiveUser.discriminator, name: effectiveUser.name, avatar_url: effectiveUser.avatar_url };
+            const safeUser = { id: effectiveUser.id, username: effectiveUser.username, discriminator: effectiveUser.discriminator, name: effectiveUser.name, avatar_url: effectiveUser.avatar_url, email: effectiveUser.email || null };
             if (restored) safeUser.restored = true;
             return { accessToken, user: safeUser, refreshToken: newRefresh.token, refresh_expires_at: newRefresh.expires_at, restored };
     }
@@ -216,6 +225,7 @@ export async function createOrFindUserByGoogle(profile) {
             discriminator: disc,
             name,
             avatar_url: avatarUrl,
+            email: email ? String(email).toLowerCase() : null,
         });
         user = await db('users').where({ id: userId }).first();
     }

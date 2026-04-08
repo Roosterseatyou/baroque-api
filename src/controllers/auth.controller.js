@@ -47,10 +47,10 @@ function buildRefreshCookieOptions(frontendOrigin) {
 
 export async function register(req, res) {
     try {
-        const { username, name, password } = req.body;
-        const user = await authService.registerUser({ username, name, password });
-        // return minimal user (no email)
-        res.status(201).json({ id: user.id, username: user.username, name: user.name });
+        const { username, name, password, email } = req.body;
+        const user = await authService.registerUser({ username, name, password, email });
+        // return minimal user (include email if present)
+        res.status(201).json({ id: user.id, username: user.username, name: user.name, email: user.email || null });
     } catch (error) {
         res.status(400).json({ error: error.message });
     }
@@ -70,7 +70,7 @@ export async function login(req, res) {
         res.cookie(REFRESH_COOKIE_NAME, refreshToken, cookieOpts);
         // Include a 'restored' flag if the login process restored a soft-deleted user
         const respUser = { id: user.id, username: user.username, discriminator: user.discriminator, name: user.name, avatar_url: user.avatar_url };
-        const resp = { token, refresh_expires_at, user: respUser };
+        const resp = { token, refresh_expires_at, user: { ...respUser, email: user.email || null } };
         if (typeof user?.restored !== 'undefined') resp.restored = user.restored === true;
         res.status(200).json(resp);
     } catch (error) {
@@ -93,7 +93,7 @@ export async function refresh(req, res) {
         }
         res.cookie(REFRESH_COOKIE_NAME, result.refreshToken, cookieOpts);
         // Include a 'restored' flag when refresh restored a soft-deleted user
-        const respUser = { id: result.user.id, username: result.user.username, discriminator: result.user.discriminator, name: result.user.name, avatar_url: result.user.avatar_url };
+        const respUser = { id: result.user.id, username: result.user.username, discriminator: result.user.discriminator, name: result.user.name, avatar_url: result.user.avatar_url, email: result.user.email || null };
         const resp = { token: result.accessToken, user: respUser };
         if (result.restored === true || result.user?.restored === true) resp.restored = true;
         res.status(200).json(resp);
