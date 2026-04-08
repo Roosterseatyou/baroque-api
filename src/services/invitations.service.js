@@ -1,10 +1,10 @@
 import db from '../config/knex.js'
 import { generateUUID } from '../utils/uuid.js'
 
-export async function createInvitation({ organizationId, invitedByUserId, invitedUsername = null, invitedUserId = null, role = 'viewer' }) {
+export async function createInvitation({ organizationId, invitedByUserId, invitedUsername = null, invitedUserId = null, invitedDiscriminator = null, role = 'viewer' }) {
   const id = generateUUID();
-  await db('invitations').insert({ id, organization_id: organizationId, invited_user_id: invitedUserId, invited_username: invitedUsername, invited_by_user_id: invitedByUserId, role, status: 'pending', created_at: db.fn.now(), updated_at: db.fn.now() });
-  return { id, organization_id: organizationId, invited_user_id: invitedUserId, invited_username: invitedUsername, invited_by_user_id: invitedByUserId, role, status: 'pending' };
+  await db('invitations').insert({ id, organization_id: organizationId, invited_user_id: invitedUserId, invited_username: invitedUsername, invited_discriminator: invitedDiscriminator, invited_by_user_id: invitedByUserId, role, status: 'pending', created_at: db.fn.now(), updated_at: db.fn.now() });
+  return { id, organization_id: organizationId, invited_user_id: invitedUserId, invited_username: invitedUsername, invited_discriminator: invitedDiscriminator, invited_by_user_id: invitedByUserId, role, status: 'pending' };
 }
 
 export async function getInvitationsForUser(userId) {

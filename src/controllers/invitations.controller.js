@@ -9,14 +9,27 @@ export async function createInvite(req, res) {
     const invitedBy = req.user && req.user.id
     if (!username) return res.status(400).json({ error: 'username required' })
 
-    // Try to resolve the user by handle. If resolved, store the normalized full handle (username#discriminator)
-    // so invites target a deterministic account. If not resolved, store the raw input.
+    // Try to resolve the user by handle. Store username and discriminator separately when possible
+    // to allow exact handle matching later. For unresolved inputs, preserve the raw username and
+    // leave invited_discriminator null (legacy behavior).
     const rawInput = username.trim()
     let invitedUser = await usersService.getUserByHandle(rawInput)
     const invitedUserId = invitedUser ? invitedUser.id : null
-    const invitedUsernameToStore = invitedUser ? `${invitedUser.username}#${invitedUser.discriminator}` : rawInput
+    let invitedUsernameToStore = rawInput
+    let invitedDiscriminatorToStore = null
 
-    const invite = await invitationsService.createInvitation({ organizationId: orgId, invitedByUserId: invitedBy, invitedUsername: invitedUsernameToStore, invitedUserId, role: req.body.role || 'viewer' })
+    if (invitedUser) {
+      invitedUsernameToStore = invitedUser.username
+      invitedDiscriminatorToStore = invitedUser.discriminator
+    } else if (rawInput.includes('#')) {
+      // If caller provided a handle like alice#1234 but it didn't resolve to an existing user,
+      // store the parts separately so the invite targets that specific handle if/when created.
+      const parts = rawInput.split('#')
+      invitedUsernameToStore = parts[0].trim()
+      invitedDiscriminatorToStore = (parts[1] || '').trim() || null
+    }
+
+    const invite = await invitationsService.createInvitation({ organizationId: orgId, invitedByUserId: invitedBy, invitedUsername: invitedUsernameToStore, invitedDiscriminator: invitedDiscriminatorToStore, invitedUserId, role: req.body.role || 'viewer' })
     return res.status(201).json(invite)
   } catch (err) {
     res.status(500).json({ error: err.message })
@@ -37,6 +50,8 @@ export async function listUserInvites(req, res) {
       .leftJoin('organizations as o', 'i.organization_id', 'o.id')
       .leftJoin('users as u', 'i.invited_by_user_id', 'u.id')
       .select('i.*', 'o.name as organization_name', 'u.name as invited_by_name')
+      // Only show pending invitations in the user's notifications
+      .where('i.status', 'pending')
       .orderBy('i.created_at', 'desc')
 
     // match either explicit invited_user_id OR invited_username matching this user's handle.
@@ -46,14 +61,17 @@ export async function listUserInvites(req, res) {
     q.where(function() {
       this.where('i.invited_user_id', userId)
       if (username) {
-        // full handle match (username#disc)
-        const handle = `${username}#${(currentUser && currentUser.discriminator) || ''}`
-        // If the current user has a discriminator, try matching the full stored handle first
+        // If current user has a discriminator, match stored pair (invited_username + invited_discriminator)
         if (currentUser && currentUser.discriminator) {
-          this.orWhereRaw('LOWER(i.invited_username) = LOWER(?)', [handle])
+          this.orWhere(function() {
+            this.whereRaw('LOWER(i.invited_username) = LOWER(?)', [username])
+                .andWhere('i.invited_discriminator', currentUser.discriminator)
+          })
         }
-        // also allow legacy invites that stored bare usernames (case-insensitive)
-        this.orWhereRaw('LOWER(i.invited_username) = LOWER(?)', [username])
+        // Also allow legacy invites that stored bare usernames (invited_discriminator is null)
+        this.orWhere(function() {
+          this.whereRaw('LOWER(i.invited_username) = LOWER(?)', [username]).andWhere('i.invited_discriminator', null)
+        })
       }
     })
 
@@ -92,16 +110,15 @@ export async function respondInvite(req, res) {
       if (invite.invited_user_id) {
         if (invite.invited_user_id !== userId) throw new Error('Forbidden')
       } else if (invite.invited_username) {
-        // invited_username may be a full handle (username#discriminator) or a legacy bare username
-        const invited = invite.invited_username
-        if (invited.includes('#')) {
-          // exact handle comparison: require current user to have a discriminator and compare case-insensitively
+        // If invite stored an invited_discriminator, require exact match to that handle
+        if (invite.invited_discriminator) {
           if (!currentUser.discriminator) throw new Error('Forbidden')
-          const currentHandle = `${currentUsername}#${currentUser.discriminator}`
-          if (invited.toLowerCase() !== currentHandle.toLowerCase()) throw new Error('Forbidden')
+          if (currentUsername.toLowerCase() !== String(invite.invited_username).toLowerCase() || currentUser.discriminator !== invite.invited_discriminator) {
+            throw new Error('Forbidden')
+          }
         } else {
           // legacy bare-username invites: compare case-insensitively against current username
-          if (!currentUsername || invited.toLowerCase() !== currentUsername.toLowerCase()) {
+          if (!currentUsername || invite.invited_username.toLowerCase() !== currentUsername.toLowerCase()) {
             throw new Error('Forbidden')
           }
         }
@@ -118,12 +135,9 @@ export async function respondInvite(req, res) {
       // Accept flow: resolve current target user id
       let targetUserId = invite.invited_user_id
       if (!targetUserId && invite.invited_username) {
-        // If invited_username is a full handle, parse and lookup by username+discriminator
-        if (invite.invited_username.includes('#')) {
-          const parts = invite.invited_username.split('#')
-          const uname = parts[0].trim()
-          const disc = parts[1].trim()
-          const u = await trx('users').whereRaw('LOWER(username)=LOWER(?)', [uname]).andWhere({ discriminator: disc }).first()
+        // Prefer resolving by stored discriminator when present
+        if (invite.invited_discriminator) {
+          const u = await trx('users').whereRaw('LOWER(username)=LOWER(?)', [invite.invited_username]).andWhere({ discriminator: invite.invited_discriminator }).first()
           if (u) targetUserId = u.id
         } else {
           // legacy bare-username: attempt a case-insensitive lookup; if multiple exist, prefer nothing
