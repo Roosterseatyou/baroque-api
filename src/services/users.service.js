@@ -39,7 +39,7 @@ async function generateUniqueDiscriminator(username) {
     throw new Error('Unable to generate unique discriminator');
 }
 
-export async function updateUserProfile(userId, { name, username, discriminator }) {
+export async function updateUserProfile(userId, { name, username, discriminator, email } = {}) {
     const update = {};
 
     // Load current user to decide whether discriminator assignment is needed
@@ -64,14 +64,19 @@ export async function updateUserProfile(userId, { name, username, discriminator 
         update.discriminator = disc;
     }
 
-    if (typeof arguments[1] !== 'undefined' && arguments[1] && typeof arguments[1].email !== 'undefined') {
-        const email = arguments[1].email;
+    // Explicit email handling: validate and ensure uniqueness if provided
+    if (typeof email !== 'undefined') {
         if (email) {
+            const emailStr = String(email).toLowerCase();
+            // basic email format validation
+            const emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+            if (!emailRe.test(emailStr)) throw new Error('Invalid email format');
             // ensure no other user has this email
-            const existing = await db('users').whereRaw('LOWER(email) = LOWER(?)', [String(email).toLowerCase()]).andWhereNot({ id: userId }).first();
+            const existing = await db('users').whereRaw('LOWER(email) = LOWER(?)', [emailStr]).andWhereNot({ id: userId }).first();
             if (existing) throw new Error('Email already in use');
-            update.email = String(email).toLowerCase();
+            update.email = emailStr;
         } else {
+            // explicit null to clear email
             update.email = null;
         }
     }
