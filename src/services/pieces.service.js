@@ -581,6 +581,159 @@ export async function searchPiecesInOrgLibraries({ libraryId, orgId, query, maxR
     return results;
 }
 
+// Exported wrapper implementing duplicate detection for a full library.
+export async function findDuplicatesInLibrary(libraryId) {
+    if (!libraryId) return [];
+    // Fetch pieces for analysis
+    const rows = await db('pieces').where({ library_id: libraryId }).select('id','title','composer','arranger','publisher','instrumentation','library_number','quantity','difficulty','metadata');
+    if (!rows || rows.length < 2) return [];
+
+    // normalize helpers
+    function levenshtein(a, b) {
+        const m = a.length, n = b.length;
+        if (m === 0) return n;
+        if (n === 0) return m;
+        const v0 = new Array(n + 1), v1 = new Array(n + 1);
+        for (let j = 0; j <= n; j++) v0[j] = j;
+        for (let i = 0; i < m; i++) {
+            v1[0] = i + 1;
+            for (let j = 0; j < n; j++) {
+                const cost = a[i] === b[j] ? 0 : 1;
+                v1[j + 1] = Math.min(v1[j] + 1, v0[j + 1] + 1, v0[j] + cost);
+            }
+            for (let j = 0; j <= n; j++) v0[j] = v1[j];
+        }
+        return v1[n];
+    }
+    function normalize(s) {
+        if (!s) return '';
+        return String(s).normalize('NFKD').replace(/[\u0000-\u036f]/g, '').replace(/\p{Diacritic}/gu, '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+    }
+    function similarity(a, b) {
+        if (!a && !b) return 1;
+        if (!a || !b) return 0;
+        const la = a.length, lb = b.length;
+        const dist = levenshtein(a, b);
+        const max = Math.max(la, lb);
+        if (max === 0) return 1;
+        return 1 - (dist / max);
+    }
+    function composerSimilar(aRaw, bRaw) {
+        const aNorm = normalize(aRaw || '');
+        const bNorm = normalize(bRaw || '');
+        if (!aNorm || !bNorm) return false;
+        function surnameFromRaw(raw, norm) {
+            if (!raw) return '';
+            if (raw.includes(',')) return normalize(raw.split(',')[0] || '');
+            const tokens = norm.split(' ').filter(Boolean); return tokens.length ? tokens[tokens.length - 1] : '';
+        }
+        const aSurname = surnameFromRaw(aRaw, aNorm);
+        const bSurname = surnameFromRaw(bRaw, bNorm);
+        if (aSurname && bSurname && aSurname === bSurname) return true;
+        if (aNorm.includes(bSurname) || bNorm.includes(aSurname)) return true;
+        const aTokens = aNorm.split(' ').filter(Boolean);
+        const bTokens = bNorm.split(' ').filter(Boolean);
+        for (const at of aTokens) if (bTokens.includes(at)) return true;
+        return similarity(aNorm, bNorm) >= 0.85;
+    }
+
+    const TITLE_SIM_THRESHOLD = 0.78;
+    const TITLE_STRICT_THRESHOLD = 0.9;
+
+    const items = rows.map(r => ({ raw: r, nkTitle: normalize(r.title || ''), nkComposer: normalize(r.composer || '') }));
+    const used = new Array(items.length).fill(false);
+    const groups = [];
+
+    // exact lib number collisions
+    const libNumMap = {};
+    items.forEach((it, idx) => {
+        const num = (it.raw.library_number || '').toString().trim();
+        if (!num) return;
+        if (!libNumMap[num]) libNumMap[num] = [];
+        libNumMap[num].push(idx);
+    });
+    for (const num of Object.keys(libNumMap)) {
+        const idxs = libNumMap[num];
+        if (idxs.length > 1) {
+            const pieces = idxs.map(i => items[i].raw);
+            groups.push({ titleKey: `libnum:${num}`, titleExample: `Library #${num}`, severity: 'very-high', pieces });
+            for (const i of idxs) used[i] = true;
+        }
+    }
+
+    const BUCKET_PREFIX_LEN = 10;
+    const bucketMap = new Map();
+    for (let idx = 0; idx < items.length; idx++) {
+        if (used[idx]) continue;
+        const key = (items[idx].nkTitle || '').slice(0, BUCKET_PREFIX_LEN);
+        if (!bucketMap.has(key)) bucketMap.set(key, []);
+        bucketMap.get(key).push(idx);
+    }
+
+    for (const [prefix, idxs] of bucketMap.entries()) {
+        for (let bi = 0; bi < idxs.length; bi++) {
+            const i = idxs[bi];
+            if (used[i]) continue;
+            const base = items[i];
+            const cluster = { titleKey: base.nkTitle, titleExample: base.raw.title || '', pieces: [base.raw] };
+            used[i] = true;
+            for (let bj = bi + 1; bj < idxs.length; bj++) {
+                const j = idxs[bj];
+                if (used[j]) continue;
+                const other = items[j];
+                const titleSim = similarity(base.nkTitle, other.nkTitle);
+                const baseCompRaw = base.raw.composer || '';
+                const otherCompRaw = other.raw.composer || '';
+                if (baseCompRaw && otherCompRaw) {
+                    const compSim = composerSimilar(baseCompRaw, otherCompRaw);
+                    if (titleSim >= TITLE_SIM_THRESHOLD && compSim) { cluster.pieces.push(other.raw); used[j] = true; }
+                } else {
+                    if (titleSim >= TITLE_STRICT_THRESHOLD) { cluster.pieces.push(other.raw); used[j] = true; }
+                }
+            }
+            if (cluster.pieces.length > 1) groups.push(cluster);
+        }
+    }
+
+    // compute severity
+    const results = groups.map(g => {
+        if (g.severity === 'very-high') return g;
+        const comps = g.pieces.map(p => normalize(p.composer || ''));
+        const nonEmpty = comps.filter(c => c !== '');
+        let severity = 'medium';
+        if (nonEmpty.length > 0) {
+            const ref = nonEmpty[0];
+            const allSimilar = nonEmpty.every(c => {
+                if (!c) return false;
+                const refTokens = ref.split(' ').filter(Boolean);
+                const cTokens = c.split(' ').filter(Boolean);
+                const surnameMatch = refTokens.length && cTokens.length && refTokens[refTokens.length - 1] === cTokens[cTokens.length - 1];
+                return surnameMatch || similarity(ref, c) >= 0.85;
+            });
+            if (allSimilar) {
+                let minTitleSim = 1;
+                for (let a = 0; a < g.pieces.length; a++) for (let b = a + 1; b < g.pieces.length; b++) {
+                    const ta = normalize(g.pieces[a].title || '');
+                    const tb = normalize(g.pieces[b].title || '');
+                    minTitleSim = Math.min(minTitleSim, similarity(ta, tb));
+                }
+                if (minTitleSim >= TITLE_STRICT_THRESHOLD) severity = 'high'; else severity = 'medium';
+            }
+        }
+        return { titleKey: g.titleKey, titleExample: g.titleExample, severity, pieces: g.pieces };
+    });
+
+    results.sort((a,b) => {
+        const order = { 'very-high': 0, 'high': 1, 'medium': 2 };
+        const oa = order[a.severity] ?? 3;
+        const ob = order[b.severity] ?? 3;
+        if (oa !== ob) return oa - ob;
+        return (a.titleExample || '').localeCompare(b.titleExample || '');
+    });
+
+    return results;
+}
+
 // In-memory cache for duplicate scan results
 const _dupCache = new Map();
 const DUP_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
