@@ -102,8 +102,9 @@ export async function getPieces(req, res) {
             const perPage = Math.max(1, Math.min(perPageRaw, PIECES_MAX_PER_PAGE))
             const sortField = req.query.sortField || req.query.sort || 'title'
             const sortDir = req.query.sortDir || req.query.sort_dir || req.query.sortDirection || 'asc'
-            const { pieces, total } = await piecesService.getPiecesPaged(req.params.libraryId, { page: pageNum, perPage, sortField, sortDir })
-            return res.status(200).json({ pieces, total })
+            const result = await piecesService.getPiecesPaged(req.params.libraryId, { page: pageNum, perPage, sortField, sortDir })
+            // result may include collections for client convenience
+            return res.status(200).json({ pieces: result.pieces, total: result.total, collections: result.collections || [] })
         }
         const pieces = await piecesService.getPieces(req.params.libraryId);
         res.status(200).json(pieces);

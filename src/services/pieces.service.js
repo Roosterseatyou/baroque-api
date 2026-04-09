@@ -105,8 +105,21 @@ export async function getPiecesPaged(libraryId, { page = 1, perPage = 20, sortFi
     const sf = String(sortField || defaultSort).toLowerCase()
     const orderField = allowedSortFields.includes(sf) ? sf : defaultSort
     const dir = (String(sortDir || 'asc').toLowerCase() === 'desc') ? 'desc' : 'asc'
+    // Always join collections so client receives collection metadata alongside pieces
+    let rowsQuery = db('pieces')
+      .where({ 'pieces.library_id': libraryId })
+      .leftJoin('collections', 'pieces.collection_id', 'collections.id')
+      .select('pieces.*', 'collections.id as coll_id', 'collections.name as coll_name', 'collections.library_number as collection_library_number')
 
-    const rows = await db('pieces').where({ library_id: libraryId }).orderBy(orderField, dir).limit(pp).offset(offset)
+    if (orderField === 'library_number') {
+      // Numeric-first ordering for library_number (collection preferred)
+      rowsQuery = rowsQuery.orderByRaw(`(CASE WHEN COALESCE(collections.library_number, pieces.library_number) REGEXP '^[0-9]+$' THEN 0 ELSE 1 END) ASC, CAST(COALESCE(collections.library_number, pieces.library_number) AS UNSIGNED) ${dir}, COALESCE(collections.library_number, pieces.library_number) ${dir}`)
+    } else {
+      // Order by the pieces.<field> explicitly to avoid ambiguity
+      rowsQuery = rowsQuery.orderBy(`pieces.${orderField}`, dir)
+    }
+
+    const rows = await rowsQuery.limit(pp).offset(offset)
 
     if (!rows || rows.length === 0) return { pieces: [], total }
 
@@ -121,15 +134,32 @@ export async function getPiecesPaged(libraryId, { page = 1, perPage = 20, sortFi
         tagsByPiece[row.piece_id].push({ id: row.id, name: row.name });
     }
 
-    const collectionIds = [...new Set(rows.map(p => p.collection_id).filter(Boolean))];
+    // If we joined collections above, use the joined collection fields to avoid
+    // an extra DB roundtrip. Otherwise, query collections for the page.
     let collectionsById = {};
-    if (collectionIds.length) {
+    if (rows.length && rows[0].coll_id) {
+      for (const r of rows) {
+        if (r.coll_id) collectionsById[r.coll_id] = { id: r.coll_id, name: r.coll_name, library_number: r.collection_library_number };
+      }
+    } else {
+      const collectionIds = [...new Set(rows.map(p => p.collection_id).filter(Boolean))];
+      if (collectionIds.length) {
         const cols = await db('collections').whereIn('id', collectionIds).select('id','name','library_number');
         for (const c of cols) collectionsById[c.id] = c;
+      }
     }
 
-    const piecesOut = rows.map(p => ({ ...p, tags: tagsByPiece[p.id] || [], quantity: p.quantity != null ? Number(p.quantity) : 1, collection: p.collection_id ? (collectionsById[p.collection_id] || null) : null }))
-    return { pieces: piecesOut, total }
+    const piecesOut = rows.map(p => {
+      const collKey = p.coll_id || p.collection_id || null
+      return { ...p, tags: tagsByPiece[p.id] || [], quantity: p.quantity != null ? Number(p.quantity) : 1, collection: collKey ? (collectionsById[collKey] || null) : null }
+    })
+    // sample logging removed
+
+    // Also include the library's collections so the client can display collection
+    // rows even when the current page does not contain pieces from every collection.
+    const allCollections = await db('collections').where({ library_id: libraryId }).select('id','name','library_number','metadata')
+    const parsedCollections = allCollections.map(c => ({ id: c.id, name: c.name, library_number: c.library_number, metadata: (typeof c.metadata === 'string' ? (() => { try { return JSON.parse(c.metadata) } catch (e) { return null } })() : c.metadata) }))
+    return { pieces: piecesOut, total, collections: parsedCollections }
 }
 
 export async function updatePiece(pieceId, data) {
@@ -246,72 +276,110 @@ export async function searchPiecesInOrgLibraries({ libraryId, orgId, query, maxR
     // If includeExternal is false we require orgId; otherwise includeExternal will search across orgs
     if (!includeExternal && !orgId) return [];
 
-    // determine candidate libraries
-    let libs = [];
-    if (includeExternal) {
-        // include libraries only from organizations that have explicitly opted in (allow_sharing = true)
-        const allowedOrgs = await db('organizations').where({ allow_sharing: true }).select('id');
-        const allowedOrgIds = allowedOrgs.map(o => o.id);
-        if (allowedOrgIds.length === 0) return [];
-        libs = await db('libraries').whereIn('organization_id', allowedOrgIds).select('id');
-    } else {
-        // get other libraries in the org
-        libs = await db('libraries').where({ organization_id: orgId }).select('id');
+    // Build merged rows (collections as blocks and pieces as rows) server-side
+    // so pagination and sorting treat collection rows as first-class entries.
+    const allowedSortFields = ['title', 'composer', 'library_number', 'created_at', 'instrumentation', 'quantity']
+    const defaultSort = 'title'
+    const sf = String(sortField || defaultSort).toLowerCase()
+    const orderField = allowedSortFields.includes(sf) ? sf : defaultSort
+    const dir = (String(sortDir || 'asc').toLowerCase() === 'desc') ? -1 : 1
+
+    // Fetch collections and pieces (minimal fields) for merging
+    const cols = await db('collections').where({ library_id: libraryId }).select('id','name','library_number','metadata')
+    const allPieces = await db('pieces').where({ library_id: libraryId }).select('id','title','composer','library_number','collection_id','instrumentation','quantity','difficulty','arranger','publisher','metadata')
+
+    // Map pieces by collection
+    const piecesByCollection = {}
+    for (const pp of allPieces) {
+      const cid = pp.collection_id || null
+      if (cid) {
+        piecesByCollection[cid] = piecesByCollection[cid] || []
+        piecesByCollection[cid].push(pp)
+      }
     }
-    const libIds = libs.map(l => l.id).filter(id => id !== libraryId);
-    if (libIds.length === 0) return [];
 
-    const q = (query || '').trim();
-    // query pieces from the candidate libraries (do not join libraries or select library names)
-    const piecesQuery = db('pieces')
-        .whereIn('library_id', libIds)
-        .select('pieces.*');
-    if (q) {
-        const like = `%${q}%`;
-        piecesQuery.andWhere(function() {
-            this.where('title', 'like', like).orWhere('composer', 'like', like).orWhere('library_number', 'like', like);
-        });
+    // Helper to produce sort keys
+    function getSortKeyForCollection(c) {
+      if (orderField === 'title') return (c.name || '').toString().toLowerCase()
+      if (orderField === 'library_number') return String(c.library_number || '')
+      return (c.metadata && c.metadata[orderField]) || (c.name || '')
     }
-    piecesQuery.limit(maxResults);
+    function getSortKeyForPiece(p) {
+      if (orderField === 'title') return (p.title || '').toString().toLowerCase()
+      if (orderField === 'library_number') return String(p.library_number || '')
+      return (p[orderField] !== undefined && p[orderField] !== null) ? String(p[orderField]) : (p.title || '')
+    }
 
-    const pieces = await piecesQuery;
-    if (!pieces || pieces.length === 0) return [];
+    // Build blocks: collection blocks and ungrouped pieces
+    const blocks = []
+    for (const c of cols) {
+      const key = getSortKeyForCollection(c)
+      blocks.push({ type: 'collection', key, collection: c })
+    }
+    for (const p of allPieces.filter(x => !x.collection_id)) {
+      const key = getSortKeyForPiece(p)
+      blocks.push({ type: 'piece', key, piece: p })
+    }
 
-    const pieceIds = pieces.map(p => p.id);
-    const tagRows = await db('piece_tags')
+    // Sort blocks
+    blocks.sort((a,b) => {
+      const aVal = a.key || ''
+      const bVal = b.key || ''
+      // numeric-aware localeCompare to handle numbers gracefully
+      const cmp = aVal.localeCompare(bVal, undefined, { numeric: true, sensitivity: 'base' })
+      return dir * cmp
+    })
+
+    // Flatten blocks into rows (collections with their children)
+    const rows = []
+    for (let bi = 0; bi < blocks.length; bi++) {
+      const b = blocks[bi]
+      if (b.type === 'collection') {
+        const c = b.collection
+        rows.push({ __type: 'collection', id: c.id, name: c.name, library_number: c.library_number, metadata: (typeof c.metadata === 'string' ? (() => { try { return JSON.parse(c.metadata) } catch (e) { return null } })() : c.metadata) })
+        // add children immediately after collection
+        const kids = (piecesByCollection[c.id] || []).slice()
+        // sort children by same orderField
+        kids.sort((x,y) => {
+          const ax = getSortKeyForPiece(x)
+          const bx = getSortKeyForPiece(y)
+          return dir * String(ax).localeCompare(String(bx), undefined, { numeric: true, sensitivity: 'base' })
+        })
+        for (const k of kids) rows.push({ __type: 'piece', ...k, __fromCollection: true })
+      } else {
+        rows.push({ __type: 'piece', ...b.piece, __fromCollection: false })
+      }
+    }
+
+    const totalRows = rows.length
+    const start = (p - 1) * pp
+    const pageSlice = rows.slice(start, start + pp)
+
+    // For piece rows in slice, fetch tags
+    const pieceIdsInSlice = pageSlice.filter(r => r.__type === 'piece').map(r => r.id)
+    let tagsByPiece = {}
+    if (pieceIdsInSlice.length) {
+      const tagRows = await db('piece_tags')
         .join('tags', 'piece_tags.tag_id', 'tags.id')
-        .whereIn('piece_tags.piece_id', pieceIds)
-        .select('piece_tags.piece_id as piece_id', 'tags.id as id', 'tags.name as name');
-    const tagsByPiece = {};
-    for (const row of tagRows) {
-        tagsByPiece[row.piece_id] = tagsByPiece[row.piece_id] || [];
-        tagsByPiece[row.piece_id].push({ id: row.id, name: row.name });
-    }
-    return pieces.map(p => ({ ...p, tags: tagsByPiece[p.id] || [], quantity: p.quantity != null ? Number(p.quantity) : 1 }));
-}
-
-// Find potential duplicate pieces in a library.
-// Returns an array of groups where each group has:
-// { titleKey, titleExample, severity: 'high'|'medium', pieces: [ ...pieces ] }
-// severity = 'high' when title and composer normalize identically across the group
-// severity = 'medium' when title matches but composers differ
-export async function findDuplicatesInLibrary(libraryId) {
-    if (!libraryId) return [];
-    const rows = await db('pieces').where({ library_id: libraryId }).select('id','title','composer','arranger','publisher','library_number','instrumentation','metadata');
-    if (!rows || rows.length === 0) return [];
-
-    // Normalization: trim, collapse whitespace, remove punctuation, lowercase
-    function normalize(s) {
-        if (!s && s !== 0) return '';
-        return String(s)
-            .replace(/[\u2018\u2019\u201C\u201D]/g, "'") // normalize smart quotes
-            .replace(/[^\w\s]/g, '')
-            .replace(/\s+/g, ' ')
-            .trim()
-            .toLowerCase();
+        .whereIn('piece_tags.piece_id', pieceIdsInSlice)
+        .select('piece_tags.piece_id as piece_id', 'tags.id as id', 'tags.name as name')
+      for (const tr of tagRows) {
+        tagsByPiece[tr.piece_id] = tagsByPiece[tr.piece_id] || []
+        tagsByPiece[tr.piece_id].push({ id: tr.id, name: tr.name })
+      }
     }
 
-    // Levenshtein distance
+    // Attach tags and normalize quantities for piece rows
+    for (const r of pageSlice) {
+      if (r.__type === 'piece') {
+        r.tags = tagsByPiece[r.id] || []
+        r.quantity = r.quantity != null ? Number(r.quantity) : 1
+      }
+    }
+
+    return { pieces: pageSlice, total: totalRows };
+
+    // helper: compute Levenshtein distance between two strings
     function levenshtein(a, b) {
         const m = a.length, n = b.length;
         if (m === 0) return n;
@@ -327,6 +395,19 @@ export async function findDuplicatesInLibrary(libraryId) {
             for (let j = 0; j <= n; j++) v0[j] = v1[j];
         }
         return v1[n];
+    }
+
+    // helper: normalize strings for comparison (strip diacritics/punctuation, collapse spaces, lowercase)
+    function normalize(s) {
+        if (!s) return '';
+        return String(s)
+            .normalize('NFKD')
+            .replace(/[ -\u036f]/g, '')
+            .replace(/\p{Diacritic}/gu, '')
+            .toLowerCase()
+            .replace(/[^a-z0-9\s]/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
     }
 
     function similarity(a, b) {
