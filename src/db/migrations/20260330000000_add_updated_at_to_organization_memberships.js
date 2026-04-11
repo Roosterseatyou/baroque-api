@@ -4,8 +4,8 @@
  * @returns { Promise<void> }
  */
 export async function up(knex) {
-  return knex.schema.alterTable('organization_memberships', table => {
-    table.timestamp('updated_at').defaultTo(knex.fn.now());
+  return knex.schema.alterTable("organization_memberships", (table) => {
+    table.timestamp("updated_at").defaultTo(knex.fn.now());
   });
 }
 
@@ -14,8 +14,7 @@ export async function up(knex) {
  * @returns { Promise<void> }
  */
 export async function down(knex) {
-  return knex.schema.alterTable('organization_memberships', table => {
-    table.dropColumn('updated_at');
+  return knex.schema.alterTable("organization_memberships", (table) => {
+    table.dropColumn("updated_at");
   });
 }
-

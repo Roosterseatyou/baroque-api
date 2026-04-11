@@ -4,10 +4,10 @@
  * @returns { Promise<void> }
  */
 export async function up(knex) {
-    // default to 1 for existing rows
-    return knex.schema.alterTable('pieces', table => {
-        table.integer('quantity').notNullable().defaultTo(1);
-    });
+  // default to 1 for existing rows
+  return knex.schema.alterTable("pieces", (table) => {
+    table.integer("quantity").notNullable().defaultTo(1);
+  });
 }
 
 /**
@@ -15,8 +15,7 @@ export async function up(knex) {
  * @returns { Promise<void> }
  */
 export async function down(knex) {
-    return knex.schema.alterTable('pieces', table => {
-        table.dropColumn('quantity');
-    });
+  return knex.schema.alterTable("pieces", (table) => {
+    table.dropColumn("quantity");
+  });
 }
-

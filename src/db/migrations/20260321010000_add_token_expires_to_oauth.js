@@ -3,8 +3,8 @@
  * @returns { Promise<void> }
  */
 export async function up(knex) {
-  return knex.schema.alterTable('oauth_info', table => {
-    table.timestamp('token_expires_at').nullable();
+  return knex.schema.alterTable("oauth_info", (table) => {
+    table.timestamp("token_expires_at").nullable();
   });
 }
 
@@ -13,7 +13,7 @@ export async function up(knex) {
  * @returns { Promise<void> }
  */
 export async function down(knex) {
-  return knex.schema.alterTable('oauth_info', table => {
-    table.dropColumn('token_expires_at');
+  return knex.schema.alterTable("oauth_info", (table) => {
+    table.dropColumn("token_expires_at");
   });
 }

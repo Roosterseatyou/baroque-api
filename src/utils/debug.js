@@ -2,7 +2,7 @@
 function _isTruthy(val) {
   if (val === undefined || val === null) return false;
   const s = String(val).toLowerCase();
-  return s === '1' || s === 'true' || s === 'yes' || s === 'on';
+  return s === "1" || s === "true" || s === "yes" || s === "on";
 }
 
 export function isDebug() {
@@ -11,8 +11,11 @@ export function isDebug() {
 
 export function debugLog(...args) {
   if (!isDebug()) return;
-  try { console.log(...args); } catch (e) { /* ignore */ }
+  try {
+    console.log(...args);
+  } catch (e) {
+    /* ignore */
+  }
 }
 
 export default { isDebug, debugLog };
-
