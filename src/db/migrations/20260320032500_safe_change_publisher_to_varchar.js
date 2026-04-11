@@ -13,7 +13,9 @@
 export async function up(knex) {
   await knex.transaction(async (trx) => {
     // add temporary varchar column
-    await trx.raw(`ALTER TABLE pieces ADD COLUMN publisher_tmp VARCHAR(255) NULL`);
+    await trx.raw(
+      `ALTER TABLE pieces ADD COLUMN publisher_tmp VARCHAR(255) NULL`,
+    );
 
     // populate publisher_tmp carefully from JSON object or string values
     // JSON_UNQUOTE(JSON_EXTRACT(...)) extracts the name; JSON_UNQUOTE(publisher) extracts a JSON string value
@@ -30,7 +32,9 @@ export async function up(knex) {
 
     // For any remaining NULL publisher_tmp, leave as NULL. Now drop the JSON column and rename temp to publisher varchar.
     await trx.raw(`ALTER TABLE pieces DROP COLUMN publisher`);
-    await trx.raw(`ALTER TABLE pieces CHANGE COLUMN publisher_tmp publisher VARCHAR(255) NULL`);
+    await trx.raw(
+      `ALTER TABLE pieces CHANGE COLUMN publisher_tmp publisher VARCHAR(255) NULL`,
+    );
   });
 }
 
@@ -49,6 +53,8 @@ export async function down(knex) {
 
     // drop varchar column and rename tmp back to publisher JSON
     await trx.raw(`ALTER TABLE pieces DROP COLUMN publisher`);
-    await trx.raw(`ALTER TABLE pieces CHANGE COLUMN publisher_tmp publisher JSON NULL`);
+    await trx.raw(
+      `ALTER TABLE pieces CHANGE COLUMN publisher_tmp publisher JSON NULL`,
+    );
   });
 }

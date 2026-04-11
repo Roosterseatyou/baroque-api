@@ -3,16 +3,16 @@
  * @param { import("knex").Knex } knex
  */
 export async function up(knex) {
-  return knex.schema.alterTable('oauth_info', table => {
-    table.text('access_token').nullable().alter()
-    table.text('refresh_token').nullable().alter()
-  })
+  return knex.schema.alterTable("oauth_info", (table) => {
+    table.text("access_token").nullable().alter();
+    table.text("refresh_token").nullable().alter();
+  });
 }
 
 export async function down(knex) {
-  return knex.schema.alterTable('oauth_info', table => {
+  return knex.schema.alterTable("oauth_info", (table) => {
     // revert to varchar(255) if that was the previous type — adjust if your schema differs
-    table.string('access_token', 255).nullable().alter()
-    table.string('refresh_token', 255).nullable().alter()
-  })
+    table.string("access_token", 255).nullable().alter();
+    table.string("refresh_token", 255).nullable().alter();
+  });
 }

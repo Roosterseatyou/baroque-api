@@ -4,15 +4,15 @@
  * @param { import("knex").Knex } knex
  */
 export async function up(knex) {
-  return knex.schema.alterTable('oauth_info', table => {
-    table.string('avatar_url').nullable().alter()
-    table.string('provider_user_id').nullable().alter()
-  })
+  return knex.schema.alterTable("oauth_info", (table) => {
+    table.string("avatar_url").nullable().alter();
+    table.string("provider_user_id").nullable().alter();
+  });
 }
 
 export async function down(knex) {
-  return knex.schema.alterTable('oauth_info', table => {
-    table.string('avatar_url').notNullable().alter()
-    table.string('provider_user_id').notNullable().alter()
-  })
+  return knex.schema.alterTable("oauth_info", (table) => {
+    table.string("avatar_url").notNullable().alter();
+    table.string("provider_user_id").notNullable().alter();
+  });
 }
